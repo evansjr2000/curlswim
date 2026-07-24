@@ -1,0 +1,20 @@
+1. Change the literate program swim-times.w to store the csv file in a Postgres Database called swim-times,
+as well as list it out at the terminal if 
+the option "csv" is given, along with the option "store".
+
+2.  Create a schema for the csv file to be used to store the data in a Postgres Database.
+
+3.  Assume the script "pg.sh" is used to start up the database.
+
+4.  Add a user option "ledecky10" to retrieve Katie Ledecky's times as a nine or ten-year old.
+
+5.  Make sure the literate program swim-times.w keeps the modules small as describe in the previous requirememts.
+
+6.  Update the CONOPS, SRS, SDD, and Test Plan as appropriate
+
+7.  Add a test script to access the database and list out the swim database, using the "pg.sh" script.
+
+8. Add an option "offline" to just access swimmer's times in the Postgres Database.
+
+9. When adding data to the database from the swim-times executable assume the psql command is only available
+from the "pg.sh" script.  

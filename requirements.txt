@@ -1,0 +1,44 @@
+
+5. Create a Makefile to build the documentation, extract the "C" code, and compile and build the  program.
+
+6.  Test that the program works, and if not figure out why, and  then fix it.  (The data fetch should not be empty.)
+
+7. Create a ".tex" file from the ".w" file, using cweb.sh.  Then run pdftex on the ".tex" file and figure out why I am getting errors when I run "pdftex".  Fix errors.
+
+10.  Add the date of the swim meet to the output.
+
+11.  Add the level obtained in the swim, i.e., "B", or "BB", or "A", etc. to the output.
+
+12.  Add a glossary to the documentation.  Document all POSIX system calls in
+the glossary. Include a description of the parameters used in the POSIX system calls.  
+
+12a. Add a description near the top of the documentation on what literate programming is.  Also add descriptions
+of the ctangle and cweave programs, and describe how they work.
+
+13.  Add an "-o" parameter to the ".w" file, with the following options following "-o":
+
+     -o kalea,  Just output Kalea times
+     -o stella, Just output Stella times.
+     -o fastest, Just output the fastest time for the event
+     -o csv,  Output a ".csv" file suitable for reading into a spreadsheet.
+     -o kenny, Just output Kenneth Ray Evans times
+     -o keith,   Just output Keith Santiago Evans times.
+     
+Allow multiple options after the "-o", such as:
+
+      -o stella,fastest which outputs Stella's fastest times
+      -o kalea,csv	which outputs Kalea's times in ".csv" format
+      -o csv		which outputs everytime for both girls in ".csv" format
+
+14.  The ".csv" file should have swimmer's name on every line.
+
+15.  Add an "-e" parameter where an individual event can be specified for lookup and print out. Allow
+multiple events to be specified on the same line.
+
+16.  If no options are given, then print out how to invoke the command, and what options are available.
+
+17.  Add events: 1000 FR SCY, 1650 FR SCY, and all long course meter events.
+
+18.  Make sure no "module" in the "*.w" contains more then 24 lines of code;
+otherwise it is "too long."  If a module is too long, break it up into sub-modules.
+

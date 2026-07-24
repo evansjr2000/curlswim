@@ -1,0 +1,14 @@
+
+1.  Add a user option "ledecky12" to retrieve Katie Ledecky's times as an eleven or twelve year old.
+
+1a.  Add a user option "ledecky14" to retrieve Katie Ledecky's times as a thirteen or fourteen year old.
+
+2.  Make sure the literate program swim-times.w keeps the modules small as describe in the previous requirememts.
+
+3. Access the Postgress database programatically, not through scripts.
+
+4. Make sure the program checks for duplicates before adding information to the swim database, and recovers
+appropriately if data already present.
+
+
+

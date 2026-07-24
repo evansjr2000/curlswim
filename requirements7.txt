@@ -1,0 +1,7 @@
+1.  Compare the code in
+/home/evansjr/myclaude/curlswim-save/swim2/swim-times.w to the code
+in /home/evansjr/myclaude/curlswim/swim2/swim-times.w.  The code in
+/home/evansjr/myclaude/curlswim-swave/swim2 is able to figure out the
+swim-meet and date of the swim-meet. The other one cannot.  Write a
+report (in LaTeX) explaining why one works and the other one does not.
+

@@ -1,0 +1,7 @@
+
+2.  Make sure all the documentation, i.e., CONOPS, SRS, SDD, etc., are updated with the new name.
+
+2a.  Follow IEEE computer software standards for documentation
+
+3.  Create an automated test script to test the requirements outlined in the SRS. And also create a software
+test plan according IEEE software standards.  The Test plan should be written in TeX.

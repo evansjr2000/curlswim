@@ -1,0 +1,216 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{parskip}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  framesep=4pt,
+  backgroundcolor=\color{gray!8},
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!45!black}\itshape,
+  stringstyle=\color{red!60!black},
+  language=C,
+  showstringspaces=false,
+}
+
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+
+\title{Why One \code{swim-times.w} Resolves the Meet and Date and the
+Other Does Not}
+\author{Comparison of \code{curlswim-save/swim2} and \code{curlswim/swim2}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Summary}
+
+Both programs are the same literate source in every respect except one:
+\emph{which USA~Swimming data-hub endpoint they call to retrieve a
+swimmer's best times}. That single choice determines whether the swim
+date and meet name are available at all.
+
+\begin{itemize}
+  \item The version that \textbf{cannot} resolve the meet and date
+        (\code{curlswim/swim2}, as committed at \code{HEAD}) calls the
+        lightweight \code{GET GetBestTimesForMember} feed. That feed
+        returns only stroke, distance, course, and formatted time. It
+        carries \emph{no} date, meet, or standard, so the program has
+        nothing to parse and deliberately blanks those columns.
+  \item The version that \textbf{can} resolve the meet and date
+        (\code{curlswim-save/swim2}, and the current working tree of
+        \code{curlswim/swim2}) calls the richer
+        \code{POST /BestTimes} query --- the same call the data-hub
+        front-end issues to render a swimmer's ``Best Times'' page.
+        Each returned record includes \code{meetName}, \code{eventCode},
+        \code{swimDate}, \code{swimTime}, and \code{timeStandard}, so the
+        scanner extracts all five fields.
+\end{itemize}
+
+In short: this is not a parsing bug and not a build difference. The
+non-working program never had the data in hand because it asked the
+wrong endpoint for it.
+
+\section{Verifying the two sources are otherwise identical}
+
+The two \code{.w} files in the working tree are byte-for-byte identical,
+as are the tangled \code{.c} and the compiled binaries:
+
+\begin{lstlisting}[language=bash]
+$ diff curlswim-save/swim2/swim-times.w curlswim/swim2/swim-times.w
+$ md5sum curlswim*/swim2/swim-times.w
+f1d02528d7ac764dcc051d42aa93b940  curlswim-save/swim2/swim-times.w
+f1d02528d7ac764dcc051d42aa93b940  curlswim/swim2/swim-times.w
+\end{lstlisting}
+
+The meaningful difference is between the \emph{committed} version of
+\code{curlswim/swim2/swim-times.w} (which used the lightweight feed) and
+the fixed version in \code{curlswim-save/swim2} (which the working tree
+has since been updated to match). The remainder of this report compares
+those two implementations.
+
+\section{The version that fails: \code{GetBestTimesForMember}}
+
+The failing program issues a single \code{GET} per member and reassembles
+each event code from the numeric distance, stroke abbreviation, and
+course code. Its own prose states plainly that the feed omits the three
+fields in question:
+
+\begin{quote}\itshape
+``The best-times feed carries only the event and the time, so
+\code{date}, \code{meet}, and \code{standard} are left empty --- those
+fields are not exposed to anonymous callers.''
+\end{quote}
+
+The request and parse loop are:
+
+\begin{lstlisting}
+@<Load best-times cache@>=
+if (strcmp(g_bt_member, member_id) != 0) {
+    free(g_bt_resp);
+    char url[512];
+    snprintf(url, sizeof url,
+             "%s/GetBestTimesForMember/%s", TIMES_API, member_id);
+    g_bt_resp = http_request(url, NULL);   /* GET: body is NULL */
+    snprintf(g_bt_member, sizeof g_bt_member, "%s", member_id);
+}
+if (!g_bt_resp) return;
+
+@<Select best time for event@>=
+const char *p = g_bt_resp;
+char abbr[8], course[8], stime[32];
+long dist;
+while (nrows < MAX_TIMES &&
+       scan_string("strokeAbbreviation", &p, abbr, sizeof abbr)) {
+    if (!scan_long("distance", &p, &dist)) break;
+    if (!scan_string("courseCode", &p, course, sizeof course)) break;
+    if (!scan_string("swimTime", &p, stime, sizeof stime)) break;
+    char code[32];
+    snprintf(code, sizeof code, "%ld %s %s", dist, abbr, course);
+    if (strcmp(code, event_code) != 0) continue;
+    rows[nrows].sort_key = time_to_seconds(stime);
+    snprintf(rows[nrows].time, sizeof rows[nrows].time, "%s", stime);
+    /* No meetName / swimDate / timeStandard in this feed: blank them. */
+    rows[nrows].date[0] = rows[nrows].standard[0] = rows[nrows].meet[0] = '\0';
+    nrows++;
+}
+\end{lstlisting}
+
+The decisive line is the explicit
+\code{rows[nrows].date[0] = rows[nrows].standard[0] =
+rows[nrows].meet[0] = '\textbackslash 0';}. The program scans only
+\code{strokeAbbreviation}, \code{distance}, \code{courseCode}, and
+\code{swimTime} because those are the only keys the response contains.
+There is no \code{meetName} or \code{swimDate} in the JSON to scan for,
+so the columns are set empty by construction. No amount of parsing could
+recover fields that the server never sent.
+
+\section{The version that works: \code{POST /BestTimes}}
+
+The working program targets the heavier endpoint the front-end itself
+uses. Because that query keys on a single stroke-and-distance pair, the
+program issues one \code{POST} per distinct pair and caches every parsed
+record per member. Crucially, each record now carries the missing
+fields:
+
+\begin{lstlisting}
+@<Times fetch@>+=
+static void fetch_pair(const char *member_id, const char *stroke, long dist)
+{
+    char url[256], body[256];
+    snprintf(url, sizeof url, "%s/BestTimes", TIMES_API);
+    snprintf(body, sizeof body,
+             "{\"memberId\":\"%s\",\"strokeAbbreviation\":\"%s\","
+             "\"distance\":%ld}", member_id, stroke, dist);
+    char *resp = http_request(url, body);   /* POST: body is non-NULL */
+    if (!resp) return;
+    @<Parse BestTimes records@>
+    free(resp);
+}
+
+@<Parse BestTimes records@>=
+const char *p = resp;
+char meet[256], event[32], date[16], stime[32], std[48];
+while (scan_string("meetName", &p, meet, sizeof meet)) {
+    if (!scan_string("eventCode", &p, event, sizeof event)) break;
+    if (!scan_string("swimDate",  &p, date,  sizeof date))  break;
+    if (!scan_string("swimTime",  &p, stime, sizeof stime)) break;
+    std[0] = '\0';
+    scan_string("timeStandard", &p, std, sizeof std);
+    cache_add(event, stime, date, std, meet);   /* meet + date preserved */
+}
+\end{lstlisting}
+
+Here the scanner reads \code{meetName} and \code{swimDate} directly out
+of each record and hands them to \code{cache_add}, which normalises the
+API's \code{"Mon DD, YYYY"} date to ISO \code{YYYY-MM-DD} and stores the
+meet name verbatim. The data exists in the response, so it survives into
+the output.
+
+\section{Side-by-side}
+
+\begin{center}
+\begin{tabular}{@{}p{0.28\textwidth}p{0.32\textwidth}p{0.32\textwidth}@{}}
+\toprule
+ & \textbf{Fails (\code{curlswim} HEAD)} & \textbf{Works (\code{curlswim-save})} \\
+\midrule
+Endpoint         & \code{GET GetBestTimesForMember/\{id\}} & \code{POST /BestTimes} \\
+HTTP method      & GET (no body)          & POST (JSON body per stroke/distance) \\
+Calls per member & One                    & One per distinct stroke-distance pair ($\approx$22) \\
+Fields returned  & stroke, distance, course, time & meetName, eventCode, swimDate, swimTime, timeStandard \\
+Meet name        & Absent $\Rightarrow$ blanked & Present $\Rightarrow$ parsed \\
+Swim date        & Absent $\Rightarrow$ blanked & Present $\Rightarrow$ parsed + ISO-normalised \\
+Standard         & Absent $\Rightarrow$ blanked & Present $\Rightarrow$ parsed \\
+Helper needed    & \code{scan_long} (numeric distance) & only \code{scan_string} (all values are strings) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Root cause}
+
+The failure is an \textbf{endpoint/data-availability} problem, not a
+code-quality problem. The \code{GetBestTimesForMember} feed is a
+summary view: it returns just enough to reassemble an event code and a
+time. The meet name, swim date, and motivational standard are simply not
+present in its payload, and the program correctly (if unhelpfully) leaves
+those columns empty rather than fabricating them.
+
+The fix, realised in the working version, is to call the richer
+\code{POST /BestTimes} query that the data hub's own web front-end uses.
+That response includes \code{meetName} and \code{swimDate} (plus
+\code{timeStandard}), so the same string scanner --- with no new parsing
+machinery beyond dropping the now-unused \code{scan_long} --- can pull
+them out. The cost is more network round trips (one POST per
+stroke-and-distance pair instead of a single GET), which the program
+amortises with a per-member cache.
+
+\end{document}

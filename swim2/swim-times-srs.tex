@@ -1,0 +1,630 @@
+% swim-times-srs.tex
+% Software Requirements Specification for the swim-times program
+% IEEE/ISO/IEC/IEEE 29148-2018 structure
+% Compiled with: pdflatex swim-times-srs.tex
+
+\documentclass[12pt]{article}
+
+\usepackage{geometry}
+\geometry{letterpaper, margin=1in}
+
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+
+\definecolor{castblue}{RGB}{0,48,135}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\small College Area Swim Team}
+\fancyhead[R]{\small SRS: swim-times}
+\fancyfoot[C]{\thepage}
+
+\titleformat{\section}{\large\bfseries\color{castblue}}{\thesection}{0.5em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\req}[1]{\textbf{[#1]}}
+
+\begin{document}
+
+% -----------------------------------------------------------------
+% Title block
+% -----------------------------------------------------------------
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  {\Huge\bfseries\color{castblue} Software Requirements Specification\\[0.5em]}
+  {\Large swim-times: Automated Swimmer-Times Retrieval System}\\[2em]
+  {\large College Area Swim Team (CAST)}\\[0.5em]
+  {\normalsize Prepared for: CAST Coaching Staff and Meet Directors}\\[0.5em]
+  {\normalsize Prepared by: CAST Technology Working Group}\\[2em]
+  \begin{tabular}{ll}
+    Document identifier: & CAST-SRS-001                                     \\
+    Revision:            & 2.0                                              \\
+    Date:                & July 11, 2026                                   \\
+    Status:              & Released                                         \\
+    Governing standard:  & ISO/IEC/IEEE 29148-2018 (Requirements Engineering) \\
+  \end{tabular}
+  \vfill
+  {\small\textit{This document is prepared in accordance with the principles
+  of rational documentation articulated in D.\,L.\,Parnas and P.\,C.\,Clements,
+  ``A Rational Design Process: How and Why to Fake It,''
+  \textit{IEEE Transactions on Software Engineering}, vol.\,SE-12, no.\,2,
+  pp.\,251--257, February 1986.}}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+% =================================================================
+\section{Introduction}
+% =================================================================
+
+\subsection{Purpose}
+
+This Software Requirements Specification (SRS) defines the
+functional and non-functional requirements for the
+\textbf{swim-times} program.  It is the binding agreement between
+the requesting stakeholders (CAST coaching staff) and the
+implementing developers, and it is the authoritative reference
+against which the software shall be verified.
+
+\subsection{Scope}
+
+The software product specified by this document is named
+\textbf{swim-times}.  It is a single-binary command-line utility
+that:
+
+\begin{itemize}
+  \item Accepts swimmer- and event-selection options on the command line.
+  \item Resolves each selected swimmer's USA~Swimming \code{PersonKey}
+        via the public Sisense JAQL person-search endpoint.
+  \item Retrieves all recorded swim times for each selected
+        swimmer--event pair from the USA~Swimming Times Elasticube.
+  \item Sorts results fastest-first and prints them as either a
+        formatted table or comma-separated values.
+\end{itemize}
+
+The program does \textbf{not} write to any database, send email,
+post to any social channel, or modify any USA~Swimming record.
+
+\subsection{Definitions, acronyms, and abbreviations}
+
+\begin{description}[style=nextline,leftmargin=2.5cm,labelindent=0pt]
+  \item[CAST] College Area Swim Team.
+  \item[ConOps] Concept of Operations document
+                (CAST-CONOPS-001).
+  \item[CSV] Comma-Separated Values.
+  \item[CWEB] Knuth's literate-programming toolchain for C
+              (\code{ctangle} + \code{cweave}).
+  \item[ElastiCube] Sisense's columnar in-memory analytics database.
+  \item[JAQL] JSON Analytics Query Language.
+  \item[LCM] Long-Course Meters.
+  \item[PersonKey] USA~Swimming's internal numeric swimmer identifier.
+  \item[SCY] Short-Course Yards.
+  \item[SDI~AGC] San Diego-Imperial Age-Group Championship.
+  \item[SRS] Software Requirements Specification (this document).
+\end{description}
+
+\subsection{References}
+
+\begin{enumerate}[label={[\arabic*]}]
+  \item ISO/IEC/IEEE 29148-2018, \textit{Systems and software engineering---
+        Life cycle processes---Requirements engineering}.
+  \item D.\,L.\,Parnas and P.\,C.\,Clements, ``A Rational Design Process:
+        How and Why to Fake It,'' \textit{IEEE Trans.\ Software Eng.},
+        vol.\,SE-12, no.\,2, pp.\,251--257, Feb.\ 1986.
+  \item CAST-CONOPS-001 Rev.\,1.0, \textit{Concept of Operations:
+        swim-times}, April 21, 2026.
+  \item \code{swim2/swim-times.w} --- CWEB literate program (source of record).
+  \item D.\,E.\,Knuth, ``Literate Programming,''
+        \textit{The Computer Journal}, vol.\,27, no.\,2,
+        pp.\,97--111, 1984.
+\end{enumerate}
+
+\subsection{Overview}
+
+Section~2 gives an overall description of the product, its users,
+constraints, and assumptions.  Section~3 enumerates the specific
+requirements, each tagged with a unique identifier of the form
+\code{REQ-X-nn} so that requirements can be traced individually
+through verification.  Section~4 specifies how each requirement
+shall be verified.
+
+% =================================================================
+\section{Overall Description}
+% =================================================================
+
+\subsection{Product perspective}
+
+swim-times is a self-contained, end-user command-line tool.
+It depends on:
+
+\begin{itemize}
+  \item The USA~Swimming Sisense analytics endpoint at
+        \texttt{usaswimming.sisense.com} for all data.
+  \item \code{libcurl} for HTTPS transport.
+  \item A POSIX C runtime for standard library functions.
+\end{itemize}
+
+It does not interoperate with any local database, message queue,
+or other process.  It is invoked as a child of an interactive
+shell or a build script.
+
+\subsection{Product functions}
+
+At a high level, swim-times performs:
+
+\begin{enumerate}
+  \item Command-line option parsing (\code{-o}, \code{-e}).
+  \item Person-search HTTPS POST to resolve a swimmer's
+        \code{PersonKey} from a name substring.
+  \item Times-query HTTPS POST per (swimmer, event) pair.
+  \item In-memory insertion sort by Sisense \code{SortKey}.
+  \item Formatted table or CSV output to standard output.
+  \item Diagnostic reporting to standard error.
+\end{enumerate}
+
+\subsection{User characteristics}
+
+The program has two user classes:
+
+\begin{description}[style=nextline]
+  \item[Coaches and parents.]
+        Comfortable with a terminal but not necessarily with
+        programming.  They use only the documented command-line
+        flags and do not modify the source.
+  \item[Maintainers.]
+        Familiar with C, CWEB, and \code{libcurl}.  They retangle
+        and recompile when the Sisense bearer token rotates or
+        when new swimmers, events, or output modes are added.
+\end{description}
+
+\subsection{Constraints}
+
+\begin{description}[style=nextline]
+  \item[Network.]
+        The host running swim-times must have outbound HTTPS access
+        to \texttt{usaswimming.sisense.com}.
+  \item[Authentication.]
+        A valid Sisense bearer token must be embedded in the
+        compiled binary.  Token rotation requires a recompile.
+  \item[Data source exclusivity.]
+        Only the USA~Swimming data hub is consulted.
+        Swimcloud is explicitly excluded by stakeholder direction.
+  \item[Single-binary distribution.]
+        The product is one statically describable executable;
+        no installer, no configuration files.
+  \item[Literate source of record.]
+        The CWEB \code{.w} file is canonical; the generated
+        \code{.c} file is a build artefact.
+\end{description}
+
+\subsection{Assumptions and dependencies}
+
+\begin{itemize}
+  \item USA~Swimming continues to expose the public REST endpoints
+        \code{times-api.usaswimming.org/swims/TimesSearch/%
+        GetMembersForFilters} and
+        \code{.../swims/TimesSearch/BestTimes} to anonymous callers.
+  \item Each \code{BestTimes} record continues to carry the fields
+        \code{eventCode}, \code{swimTime}, \code{swimDate},
+        \code{timeStandard}, and \code{meetName}.
+  \item No swimmer of interest has more than 200 recorded times in
+        any single event (matches the \code{MAX\_TIMES} compile-time
+        constant).
+\end{itemize}
+
+% =================================================================
+\section{Specific Requirements}
+% =================================================================
+
+\subsection{Functional requirements}
+
+\subsubsection{Command-line interface}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-F-01}] The program shall accept the option flag
+        \code{-o} followed by a comma-separated list of one or more
+        tokens.  Each token shall be either a \emph{behaviour keyword}
+        (\code{fastest}, \code{csv}, \code{store}, \code{offline}) or a
+        \emph{swimmer id} (alias) drawn from the roster of
+        \S\ref{sec:roster}.  Behaviour keywords and swimmer ids may be
+        freely intermixed within a single \code{-o} list.
+  \item[\req{REQ-F-02}] The program shall accept the option flag
+        \code{-e} followed by one or more comma-separated
+        USA~Swimming event codes, and shall accept the \code{-e}
+        flag repeated multiple times.
+  \item[\req{REQ-F-03}] When invoked with no options the program
+        shall print a usage message to standard error and exit
+        with status~1.
+  \item[\req{REQ-F-04}] When invoked with an unrecognised flag the
+        program shall print the usage message and exit with status~2.
+\end{description}
+
+\subsubsection{Swimmer selection}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-F-10}] Each swimmer in \texttt{SWIMMERS[]} shall
+        carry a unique string \emph{id} (alias).  When one or more
+        swimmer ids are supplied to \code{-o}, the program shall
+        process only the swimmers whose id matches one of those
+        supplied.
+  \item[\req{REQ-F-11}] When no swimmer id is supplied to \code{-o}
+        (whether or not events are supplied to \code{-e}), the
+        program shall process every entry in \texttt{SWIMMERS[]} ---
+        the full roster of \S\ref{sec:roster}.
+  \item[\req{REQ-F-12}] The set of selectable swimmers and their ids
+        (aliases) shall be exactly the roster enumerated in
+        \S\ref{sec:roster} (\req{REQ-F-17}).  An unrecognised
+        \code{-o} token that matches no swimmer id and no behaviour
+        keyword shall select no swimmer and shall not be an error.
+  \item[\req{REQ-F-13}] When any of the \code{ledecky10},
+        \code{ledecky12}, or \code{ledecky14} keywords is
+        supplied, the program shall resolve Katie Ledecky's
+        \code{memberId} via the same member-search path used for
+        the other swimmers.
+  \item[\req{REQ-F-14}] When the \code{ledecky10} keyword is
+        supplied, the program shall record the inclusive ISO date
+        window \code{2006-03-17} through \code{2008-03-16}
+        (Katie Ledecky's ninth and tenth years) on her
+        \code{Swimmer} entry.
+  \item[\req{REQ-F-15}] When the \code{ledecky12} keyword is
+        supplied, the program shall record the inclusive ISO date
+        window \code{2008-03-17} through \code{2010-03-16}
+        (Katie Ledecky's eleventh and twelfth years).
+  \item[\req{REQ-F-16}] When the \code{ledecky14} keyword is
+        supplied, the program shall record the inclusive ISO date
+        window \code{2010-03-17} through \code{2012-03-16}
+        (Katie Ledecky's thirteenth and fourteenth years).
+  \item[\req{REQ-F-16a}] The age-window fields of
+        \req{REQ-F-14}--\req{REQ-F-16} are applied to the
+        \code{offline} \texttt{SELECT} only.  The online
+        \code{BestTimes} query returns a single lifetime best per
+        course, so an online \code{ledecky*} run reports that best
+        (with its swim date) rather than an age-filtered subset.
+        Age-bracket filtering of the online path is deferred pending
+        a signed-in richer-times endpoint.
+\end{description}
+
+\subsubsection{Swimmer roster (names and aliases)}
+\label{sec:roster}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-F-17}] The program shall be designed to fetch times
+        for exactly the swimmers listed in Table~\ref{tab:roster}.
+        Each row gives the swimmer's full name, the unique id (alias)
+        by which she is selected on the command line, and the
+        person-search query and lower-cased match substring used to
+        resolve her USA~Swimming \code{PersonKey}.  ``Evans, Stella~J''
+        in the source roster request is the same swimmer as
+        \code{stella} and is not duplicated.
+\end{description}
+
+\begin{longtable}{@{}l l l l@{}}
+  \caption{Swimmer roster: names and aliases.}\label{tab:roster}\\
+  \toprule
+  \textbf{Full name} & \textbf{id (alias)} & \textbf{Search query}
+    & \textbf{Match substr} \\
+  \midrule
+  \endfirsthead
+  \toprule
+  \textbf{Full name} & \textbf{id (alias)} & \textbf{Search query}
+    & \textbf{Match substr} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+  Stella Julianna Evans   & \code{stella}              & Julianna Evans  & stella \\
+  Kalea Rose Benavente    & \code{kalea}               & Benavente       & kalea \\
+  Kenneth Ray Evans       & \code{kenny}               & Ray Evans       & kenneth ray \\
+  Keith Santiago Evans    & \code{keith}               & Santiago Evans  & keith santiago \\
+  Katie Genevieve Ledecky & \code{ledecky10}           & Ledecky         & katie \\
+  Katie Genevieve Ledecky & \code{ledecky12}           & Ledecky         & katie \\
+  Katie Genevieve Ledecky & \code{ledecky14}           & Ledecky         & katie \\
+  Emma Katherine Bothwell & \code{bothwell-emma}       & Emma Bothwell        & emma \\
+  Wally Baris Coombs      & \code{coombs-wally}        & Wally Coombs         & wally \\
+  Eva Cruz Rae Cruz       & \code{cruz-eva}            & Eva Cruz             & cruz rae \\
+  Zoe Elizabeth Darrow    & \code{darrow-zoe}          & Zoe Darrow           & zoe \\
+  Eva Doan                & \code{doan-eva}            & Eva Doan             & eva doan \\
+  Nova Larue Ellis        & \code{ellis-nova}          & Nova Ellis           & nova \\
+  Liliya Penny Fedyshyn   & \code{fedyshyn-liliya}     & Liliya Fedyshyn      & liliya \\
+  Layla Emmanuelle Glass  & \code{glass-layla}         & Layla Glass          & layla \\
+  Logan Wiley Glass       & \code{glass-logan}         & Logan Glass          & wiley \\
+  Hannah Francis Gosser   & \code{gosser-hannah}       & Hannah Gosser        & gosser \\
+  Diamond Khaan Huynh     & \code{huynh-diamond}       & Diamond Huynh        & diamond \\
+  Hannah Leigh Knuth      & \code{knuth-hannah}        & Hannah Knuth         & knuth \\
+  Cleo L Lefebvre-Bailey  & \code{lefebvre-bailey-cleo}& Cleo Lefebvre-Bailey & cleo \\
+  Gia N Mendez            & \code{mendez-giavanna}     & Giavanna Mendez      & mendez \\
+  Sofia Elizabeth Mulvaney& \code{mulvaney-sofia}      & Sofia Mulvaney       & sofia \\
+  Naia Lamb Shay          & \code{shay-naia}           & Naia Shay            & naia \\
+  Briar Reece Simmons     & \code{simmons-briar}       & Briar Simmons        & briar \\
+  Presley Aspen Simmons   & \code{simmons-presley}     & Presley Simmons      & aspen \\
+  Lucas Erick Soto        & \code{soto-lucas}          & Lucas Soto           & erick \\
+  Vivi Edith Soto         & \code{soto-vivienne}       & Vivienne Soto        & vivi \\
+  Addison Marie Wittmershaus & \code{wittmershaus-addison}& Addison Wittmershaus & addison \\
+  Elsie Marguerite Zahner & \code{zahner-elsie}        & Elsie Zahner         & elsie \\
+\end{longtable}
+
+\subsubsection{Event selection}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-F-20}] When one or more event codes are supplied
+        to \code{-e}, the program shall query only those events.
+  \item[\req{REQ-F-21}] When \code{-e} is omitted, the program
+        shall query all thirty-one default events
+        (fourteen SCY, seventeen LCM) listed in the swim-times ConOps.
+  \item[\req{REQ-F-22}] The program shall support up to
+        \code{NUM\_EVENTS} event codes per invocation; additional
+        codes beyond that limit shall be silently dropped.
+\end{description}
+
+\subsubsection{Data retrieval}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-F-30}] For each selected swimmer the program
+        shall resolve a \code{memberId} by issuing one HTTPS POST
+        to \code{times-api.usaswimming.org/swims/TimesSearch/%
+        GetMembersForFilters} (body \code{\{"name":"\dots"\}}) and
+        matching the configured lower-cased substring against the
+        returned \code{fullName} field.
+  \item[\req{REQ-F-31}] For each distinct stroke-and-distance pair
+        among the requested events the program shall issue one HTTPS
+        POST to \code{.../swims/TimesSearch/BestTimes} (body
+        \code{\{"memberId":"\dots","strokeAbbreviation":"\dots",%
+        "distance":n\}}), which returns the swimmer's lifetime best
+        for that pair in each course (SCY and~LCM).
+  \item[\req{REQ-F-32}] The program shall read five fields per
+        returned record: \code{eventCode}, \code{swimTime},
+        \code{swimDate}, \code{timeStandard} (the motivational
+        standard), and \code{meetName}.
+  \item[\req{REQ-F-33}] The program shall cache all records returned
+        for a member and answer every per-event query from that cache,
+        issuing no more than one \code{BestTimes} POST per distinct
+        stroke-and-distance pair.
+\end{description}
+
+\subsubsection{Result processing}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-F-40}] The program shall sort the rows for each
+        event by swim time ascending (smallest = fastest), using the
+        seconds value computed by \code{time\_to\_seconds}, before
+        printing.
+  \item[\req{REQ-F-41}] When the \code{fastest} keyword is supplied,
+        the program shall print only the single fastest row per
+        event, suppressing all slower entries.
+  \item[\req{REQ-F-42}] The program shall reformat dates from the
+        API's \code{"Mon DD, YYYY"} form to ISO \code{YYYY-MM-DD}.
+\end{description}
+
+\subsubsection{Output}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-F-50}] In the default (table) mode the program
+        shall print, for each event, a heading line, a column
+        header, a separator, and one row per recorded time
+        containing time, date, motivational standard, and meet name.
+  \item[\req{REQ-F-51}] When the \code{csv} keyword is supplied
+        the program shall print exactly one CSV header line at the
+        start of output and one CSV data line per recorded time.
+        Each CSV data line shall contain swimmer name, event code,
+        time, date, motivational standard, and meet name in that order.
+  \item[\req{REQ-F-52}] When an event has zero recorded times in
+        table mode the program shall print the literal
+        \code{(no times found)} for that event.
+\end{description}
+
+\subsubsection{Error handling}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-F-60}] If a swimmer's \code{memberId} cannot be
+        resolved the program shall print a diagnostic to standard
+        error, free all libcurl global state, and exit with
+        status~1.
+  \item[\req{REQ-F-61}] If an individual times query fails, the
+        program shall print a diagnostic to standard error and
+        continue with the next event without aborting.
+\end{description}
+
+\subsubsection{Database persistence}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-F-70}] When the \code{store} keyword is supplied,
+        the program shall write every emitted row to the local
+        Postgres database \texttt{swim-times} programmatically via
+        the \texttt{libpq} client library, using a prepared
+        \texttt{INSERT \dots\ ON~CONFLICT~DO~NOTHING} per row.
+        \code{store} composes with \code{csv}: stdout still
+        receives the CSV stream while the rows are persisted.
+  \item[\req{REQ-F-71}] When the \code{offline} keyword is
+        supplied, the program shall read swim rows from the local
+        Postgres \texttt{swim-times} database and emit them in the
+        same table or CSV form as the online path, without
+        touching the network.
+  \item[\req{REQ-F-72}] Under \code{offline}, the program shall
+        not initialise libcurl and shall not issue any HTTP
+        request.
+  \item[\req{REQ-F-73}] The \texttt{swim\_times} schema shall
+        enforce a UNIQUE constraint on
+        \code{(swimmer, event, swim\_time, swim\_date, meet)} so
+        that re-running a \code{store} invocation does not
+        introduce duplicate rows.
+  \item[\req{REQ-F-74}] If the libpq connection cannot be
+        established for \code{store}, the program shall print a
+        single warning to standard error and continue with the
+        run, without persisting any rows.  Under \code{offline} a
+        connection failure is fatal and exits with status~1.
+  \item[\req{REQ-F-75}] When \code{store} is rerun against a
+        \texttt{swim\_times} table that already contains the rows
+        being inserted, the program shall recover gracefully: each
+        duplicate row shall be silently absorbed by the
+        \texttt{ON~CONFLICT~DO~NOTHING} clause without aborting
+        the transaction, the process shall exit~0, and no
+        diagnostic shall be written to standard error.
+        (This realises requirement~\#4 of \texttt{requirements4.txt}.)
+\end{description}
+
+\subsection{External interface requirements}
+
+\subsubsection{User interfaces}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-I-01}] All user interaction shall be via
+        command-line arguments and process exit status; the
+        program shall not read from standard input.
+\end{description}
+
+\subsubsection{Software interfaces}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-I-10}] The program shall use the
+        \code{libcurl} ``easy'' interface for all HTTP transport.
+  \item[\req{REQ-I-11}] The program shall send the headers
+        \code{Content-Type: application/json} and
+        \code{Authorization: Bearer \{token\}} on every JAQL
+        request.
+  \item[\req{REQ-I-12}] The program shall reach Postgres
+        \emph{programmatically} through the \texttt{libpq} client
+        library --- never by spawning \texttt{psql} or any other
+        external script (this realises requirement~\#3 of
+        \texttt{requirements4.txt}).  The connection string shall
+        be taken from the \texttt{SWIM\_TIMES\_PGCONNINFO}
+        environment variable when set, otherwise the default
+        keyword string \texttt{dbname=swim-times user=postgres
+        host=localhost port=5432}.
+\end{description}
+
+\subsubsection{Communication interfaces}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-I-20}] All network communication shall use HTTPS
+        (TLS) to the host \texttt{usaswimming.sisense.com}.
+\end{description}
+
+\subsection{Performance requirements}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-P-01}] A full refresh of all seven
+        \texttt{SWIMMERS[]} entries across all thirty-one default
+        events ($7 \times (1 + 31) = 224$ HTTP requests, including
+        the three Ledecky age-window entries that share an
+        underlying person but each issue their own person-search
+        and event queries) shall complete within five minutes on a
+        residential broadband connection.
+  \item[\req{REQ-P-02}] A single-swimmer single-event query
+        (\code{-o stella -e "100 FR SCY"}) shall complete within
+        ten seconds under normal Sisense response time.
+  \item[\req{REQ-P-03}] An offline single-swimmer single-event
+        query (\code{-o stella,offline -e "100 FR SCY"}) shall
+        complete within two seconds against a local Postgres
+        instance carrying typical row counts.
+\end{description}
+
+\subsection{Design constraints}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-D-01}] The software shall be implemented in C
+        conformant to ISO/IEC 9899:1999 (C99) or later.
+  \item[\req{REQ-D-02}] The canonical source shall be a CWEB
+        literate program (\code{swim-times.w}); the
+        \code{.c} file shall be a build artefact only.
+  \item[\req{REQ-D-03}] No source-code module (named CWEB chunk)
+        shall exceed twenty-four lines, in keeping with the
+        existing literate-programming style of the codebase.
+  \item[\req{REQ-D-04}] No third-party dependency other than
+        \code{libcurl}, \code{libpq} (the Postgres C client
+        library, added by requirements4.txt~\#3), and the standard
+        C library shall be linked into the binary.  Transitive
+        TLS, compression, and authentication libraries pulled in
+        by \code{libcurl} or \code{libpq} are also permitted.
+  \item[\req{REQ-D-10}] The Postgres schema for persisted swim
+        rows shall be defined in \texttt{schema.sql} adjacent to
+        the source.  The table \texttt{swim\_times} shall expose
+        the seven application columns listed in REQ-F-32 plus an
+        identity primary key and a \texttt{fetched\_at} timestamp,
+        and shall declare a UNIQUE constraint per REQ-F-73.
+\end{description}
+
+\subsection{Software system attributes}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-A-01} (Reliability)] The program shall produce
+        identical output for identical Sisense responses on
+        repeated invocations.
+  \item[\req{REQ-A-02} (Maintainability)] All Sisense endpoint
+        URLs and bearer tokens shall be declared as named
+        constants in clearly identifiable CWEB chunks.
+  \item[\req{REQ-A-03} (Portability)] The program shall build
+        and run unmodified on any POSIX.1-2008 system with
+        \code{libcurl} 7.0 or later installed.
+  \item[\req{REQ-A-04} (Self-documentation)] The CWEB source
+        shall, when processed by \code{cweave} and \code{pdftex},
+        produce a human-readable typeset document describing both
+        the why and the how of the implementation.
+\end{description}
+
+% =================================================================
+\section{Verification}
+% =================================================================
+
+Each requirement shall be verified by one of the following methods:
+
+\begin{description}[style=nextline]
+  \item[Inspection (I).]
+        Visual examination of source, output, or documentation.
+  \item[Demonstration (D).]
+        Execution of the program with selected inputs and
+        observation of the resulting output.
+  \item[Test (T).]
+        Execution of an automated test that compares actual
+        output to an expected reference.
+  \item[Analysis (A).]
+        Reasoning about the program (e.g., line-count audit
+        of CWEB chunks for \code{REQ-D-03}).
+\end{description}
+
+\medskip
+\noindent
+The verification matrix below assigns a primary method to each
+requirement.  Test cases and demonstration scripts shall be
+documented separately in the swim-times Verification Plan.
+
+\begin{center}
+\begin{longtable}{ll}
+  \toprule
+  \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  REQ-F-01 \ldots REQ-F-04 & Demonstration \\
+  REQ-F-10 \ldots REQ-F-16 & Demonstration \\
+  REQ-F-20 \ldots REQ-F-22 & Demonstration \\
+  REQ-F-30 \ldots REQ-F-33 & Inspection + Demonstration \\
+  REQ-F-40 \ldots REQ-F-42 & Test \\
+  REQ-F-50 \ldots REQ-F-52 & Demonstration \\
+  REQ-F-60 \ldots REQ-F-61 & Demonstration \\
+  REQ-F-70 \ldots REQ-F-75 & Test (DB-gated) \\
+  REQ-I-01 \ldots REQ-I-20 & Inspection \\
+  REQ-P-01, REQ-P-02, REQ-P-03 & Demonstration (timed) \\
+  REQ-D-01, REQ-D-02, REQ-D-04 & Inspection \\
+  REQ-D-03                 & Analysis (CWEB chunk line-count audit) \\
+  REQ-D-10                 & Inspection of \texttt{schema.sql} \\
+  REQ-A-01                 & Test \\
+  REQ-A-02, REQ-A-04       & Inspection \\
+  REQ-A-03                 & Demonstration (build on second POSIX host) \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+\vfill
+\begin{center}
+  \small\textit{End of document CAST-SRS-001 Rev.\,1.0}
+\end{center}
+
+\end{document}

@@ -1,0 +1,765 @@
+% swim-times-sdd.tex
+% Software Design Document for the swim-times program
+% IEEE Std 1016-2009 structure
+% Compiled with: pdflatex swim-times-sdd.tex
+
+\documentclass[12pt]{article}
+
+\usepackage{geometry}
+\geometry{letterpaper, margin=1in}
+
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\definecolor{castblue}{RGB}{0,48,135}
+\definecolor{lightgray}{gray}{0.95}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{lightgray},
+  frame=single,
+  framesep=4pt,
+  rulecolor=\color{lightgray},
+  breaklines=true,
+  showstringspaces=false,
+  language=C,
+  keywordstyle=\bfseries\color{castblue},
+  commentstyle=\itshape\color{gray},
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\small College Area Swim Team}
+\fancyhead[R]{\small SDD: swim-times}
+\fancyfoot[C]{\thepage}
+
+\titleformat{\section}{\large\bfseries\color{castblue}}{\thesection}{0.5em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\req}[1]{\textbf{#1}}
+
+\begin{document}
+
+% -----------------------------------------------------------------
+% Title block
+% -----------------------------------------------------------------
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  {\Huge\bfseries\color{castblue} Software Design Document\\[0.5em]}
+  {\Large swim-times: Automated Swimmer-Times Retrieval System}\\[2em]
+  {\large College Area Swim Team (CAST)}\\[0.5em]
+  {\normalsize Prepared for: CAST Coaching Staff and Maintainers}\\[0.5em]
+  {\normalsize Prepared by: CAST Technology Working Group}\\[2em]
+  \begin{tabular}{ll}
+    Document identifier: & CAST-SDD-001                                \\
+    Revision:            & 2.0                                         \\
+    Date:                & July 11, 2026                               \\
+    Status:              & Released                                    \\
+    Governing standard:  & IEEE Std 1016-2009 (Software Design Descriptions) \\
+  \end{tabular}
+  \vfill
+  {\small\textit{This document is prepared in accordance with the principles
+  of rational documentation articulated in D.\,L.\,Parnas and P.\,C.\,Clements,
+  ``A Rational Design Process: How and Why to Fake It,''
+  \textit{IEEE Transactions on Software Engineering}, vol.\,SE-12, no.\,2,
+  pp.\,251--257, February 1986.}}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+% =================================================================
+\section{Introduction}
+% =================================================================
+
+\subsection{Purpose}
+
+This Software Design Document (SDD) describes the architecture
+and detailed design of the \textbf{swim-times} program.  It
+satisfies the design-description function of IEEE~Std~1016-2009
+by presenting a set of design views, each tailored to a specific
+stakeholder concern.  Together with the Concept of Operations
+(CAST-CONOPS-001) and the Software Requirements Specification
+(CAST-SRS-001), this document forms the complete development
+baseline for swim-times.
+
+\subsection{Scope}
+
+This SDD covers all code that is tangled out of the literate
+program \code{swim2/swim-times.w}.  It does not cover the
+build system, deployment, or the companion Pandoc-based PDF
+report (\code{swim/swim-times.md}); those are described
+elsewhere.
+
+\subsection{Relationship to the Parnas--Clements model}
+
+Per Parnas and Clements (1986), this document presents the
+design as if it had been derived top-down from requirements,
+even though in practice the program evolved through exploratory
+prototyping against an undocumented third-party API.  Each
+design decision is presented in the form a reader would find
+most useful, with the rationale recorded so that future changes
+can be evaluated against the original intent.
+
+% =================================================================
+\section{Design Stakeholders and Concerns}
+% =================================================================
+
+\begin{center}
+\begin{longtable}{p{3.5cm}p{3.5cm}p{6cm}}
+  \toprule
+  \textbf{Stakeholder} & \textbf{Concern} & \textbf{Addressed by view} \\
+  \midrule\endhead
+  Maintainers     & Module decomposition  & Composition view (\S4.2)        \\
+  Maintainers     & Data structures       & Information view (\S4.4)        \\
+  Maintainers     & Algorithmic detail    & Algorithm view (\S4.7)          \\
+  Coaches/parents & Behaviour at runtime  & Interaction view (\S4.6)        \\
+  Integrators     & External interfaces   & Context view (\S4.1) and Interface view (\S4.5) \\
+  Auditors        & Security boundaries   & Resource view (\S4.8)           \\
+  Reviewers       & Design rationale      & Design rationale (\S5)          \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+% =================================================================
+\section{Design Approach}
+% =================================================================
+
+\subsection{Architectural style}
+
+swim-times is a single-process, single-threaded
+\emph{pipes-and-filters} architecture realised within one address
+space: command-line options flow into an option-parsing stage,
+which feeds a swimmer-resolution stage, which feeds a per-event
+fetch-parse-sort stage, whose output is serialised by a
+formatter to standard output.  Each stage is a CWEB chunk
+(or small group of chunks) with a single responsibility.
+
+\subsection{Key design decisions}
+
+\begin{description}[style=nextline]
+  \item[D-1: CWEB literate source.]
+        The canonical source is \code{swim-times.w};
+        \code{swim-times.c} is a build artefact.  This satisfies
+        \req{REQ-D-02} and \req{REQ-A-04}.
+
+  \item[D-2: 24-line chunk discipline.]
+        No CWEB chunk exceeds twenty-four lines.  Larger logical
+        units are decomposed into named sub-chunks.  This satisfies
+        \req{REQ-D-03} and improves readability for the typeset
+        documentation.
+
+  \item[D-3: String-scanning JSON parser.]
+        A purpose-built scanner (\code{scan\_string}) is used in
+        place of a third-party JSON library.  This satisfies
+        \req{REQ-D-04}.  The same generic ``find key, take the
+        following value'' scanner served the old Sisense JAQL
+        responses and now serves the named-field REST responses
+        unchanged (see D-6).  Every field the program consumes ---
+        meet name, event code, date, time, and standard --- is a JSON
+        string, so a single string extractor suffices; the former
+        numeric \code{scan\_long} helper was retired with the GET
+        best-times feed it served.
+
+  \item[D-4: Dynamic anonymous credentials (no bearer token).]
+        The program no longer embeds a bearer token.  The USA
+        Swimming times service authenticates anonymous callers
+        with three headers --- \code{Usas-Sub-Id: Anonymous},
+        \code{AppName: DataHub}, and a client-minted
+        \code{Device-Id}.  \code{device\_id()} generates the
+        \code{Device-Id} at run time in the format the server
+        validates, so the ``token'' is obtained dynamically on
+        every run.  See \S\ref{sec:why-anon}.
+
+  \item[D-5: Insertion sort.]
+        Per-event row counts rarely exceed a few dozen, so
+        $O(n^2)$ insertion sort is used in preference to a more
+        complex algorithm.  Simpler code, fewer failure modes.
+
+  \item[D-6: REST times API, not Sisense JAQL.]
+        The data hub retired the Sisense analytics endpoint this
+        program originally targeted.  The fetch path was migrated
+        to the public \code{times-api.usaswimming.org} REST
+        service: \code{GetMembersForFilters} resolves a name to a
+        \code{memberId}, and the \code{POST /BestTimes} query
+        returns that member's best time per course for each
+        stroke-and-distance pair, complete with swim date, meet
+        name, and motivational standard.  See
+        \S\ref{sec:why-rest} and \S\ref{sec:why-bestonly}.
+
+  \item[D-8: Rich best-times query for date, meet, and standard.]
+        The lightweight \code{GET /GetBestTimesForMember} feed used
+        earlier returned only stroke, distance, course, and time.
+        To satisfy \req{REQ-F-32} and \req{REQ-F-50} (report each
+        time's date, meet, and B/BB/A/AA/AAA/AAAA standard) the fetch
+        path was moved to
+        the heavier \code{POST /BestTimes} query, which is still
+        anonymous but carries \code{swimDate}, \code{meetName}, and
+        \code{timeStandard}.  One POST is issued per distinct
+        stroke-and-distance pair and the results are cached per
+        member.  See \S\ref{sec:why-bestonly}.
+
+  \item[D-7: Id-based swimmer selection.]
+        Swimmers are selected by a unique string \code{id} carried
+        on each \code{SWIMMERS} entry rather than by a per-swimmer
+        option bit, so the roster can grow past the width of the
+        flag word.  See \S\ref{sec:why-ids}.
+\end{description}
+
+% =================================================================
+\section{Design Views}
+% =================================================================
+
+% --------------------------- 4.1 ---------------------------------
+\subsection{Context view}
+
+\paragraph{External actors.}
+\begin{itemize}
+  \item \textbf{Operator} --- a coach, parent, or maintainer
+        invoking the binary from a shell.
+  \item \textbf{USA~Swimming times API} --- the upstream HTTPS
+        service at \texttt{times-api.usaswimming.org}.
+  \item \textbf{Standard output / standard error} --- the
+        downstream sinks that receive table or CSV output and
+        diagnostics, respectively.
+\end{itemize}
+
+\paragraph{Trust boundary.}
+The only trusted external system is the times API, which
+serves only public competitive records.  No user-supplied data
+crosses a trust boundary; command-line arguments are consumed
+internally.
+
+% --------------------------- 4.2 ---------------------------------
+\subsection{Composition view}
+
+The program is decomposed into the following top-level CWEB
+chunks (the order in which they appear in the tangled output):
+
+\begin{center}
+\begin{longtable}{ll}
+  \toprule
+  \textbf{Chunk} & \textbf{Responsibility} \\
+  \midrule\endhead
+  \code{Includes}                 & Standard headers, \code{<curl/curl.h>}, \code{<libpq-fe.h>} \\
+  \code{Global constants}         & Numeric limits, \code{TIMES\_API} base URL, event table \\
+  \code{Option flags}             & \code{OPT\_*} bitmasks and global option state \\
+  \code{Type definitions}         & \code{Buffer}, \code{TimeRow}, \code{Swimmer}
+                                    structs                                          \\
+  \code{HTTP utilities}           & \code{write\_cb}, \code{base64}, \code{device\_id}, \code{http\_request} \\
+  \code{JSON scanner}             & \code{scan\_string}                            \\
+  \code{Database connection}      & \code{db\_conn\_string}, \code{db\_open},
+                                    \code{db\_close}, \code{db\_insert\_row}        \\
+  \code{Person lookup}            & \code{lookup\_member\_id}                      \\
+  \code{Times fetch}              & \code{insertion\_sort}, \code{time\_to\_seconds},
+                                    \code{normalize\_date}, \code{cache\_add},
+                                    \code{fetch\_pair}, \code{build\_member\_cache},
+                                    \code{fetch\_times}                            \\
+  \code{Offline fetch}            & \code{offline\_fetch} (libpq \code{SELECT})    \\
+  \code{Main function}            & Option parsing, swimmer table, \code{main}     \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+Each top-level chunk is itself a composition of named sub-chunks
+to honour the 24-line discipline (D-2).  For example,
+\code{http\_request} expands to \code{Initialize curl handle} +
+\code{Issue HTTP request and return}; \code{fetch\_times} rebuilds the
+per-member cache (via \code{build\_member\_cache} $\to$
+\code{fetch\_pair} $\to$ \code{Parse BestTimes records}) when the member
+changes, then selects the cached row and hands it to the shared
+sort/emit sub-chunks.
+
+% --------------------------- 4.3 ---------------------------------
+\subsection{Dependency view}
+
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  \textbf{Caller}       & \textbf{Callee}                              \\
+  \midrule
+  \code{main}           & \code{parse\_opts\_str}, \code{parse\_events\_str}, \code{print\_usage} \\
+  \code{main}           & \code{db\_open}, \code{db\_close} (under \code{store}) \\
+  \code{main}           & \code{lookup\_member\_id}, \code{fetch\_times} (online) \\
+  \code{main}           & \code{offline\_fetch} (under \code{offline})            \\
+  \code{lookup\_member\_id} & \code{http\_request}, \code{scan\_string}          \\
+  \code{fetch\_times}   & \code{build\_member\_cache}, \code{insertion\_sort}      \\
+  \code{build\_member\_cache} & \code{fetch\_pair} $\to$ \code{http\_request},
+                          \code{scan\_string}, \code{cache\_add}                 \\
+  \code{cache\_add}     & \code{time\_to\_seconds}, \code{normalize\_date}         \\
+  \code{offline\_fetch} & \code{PQexecParams}, \code{PQgetvalue},
+                          \code{insertion\_sort}                          \\
+  \code{db\_open}/\code{db\_close} & \code{PQconnectdb}, \code{PQprepare},
+                          \code{PQfinish} (libpq)                         \\
+  \code{db\_insert\_row} & \code{PQexecPrepared} (libpq)                  \\
+  \code{http\_request}  & \code{libcurl} easy interface, \code{write\_cb} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+The dependency graph is acyclic.  The two linked external
+dependencies are \code{libcurl} (HTTP) and \code{libpq} (Postgres
+client library), both linked at build time.  Postgres is reached
+\emph{programmatically} via libpq calls --- no external
+\texttt{psql} process or shell wrapper is involved (this
+realises requirement~\#3 of \texttt{requirements4.txt}).
+
+% --------------------------- 4.4 ---------------------------------
+\subsection{Information view (data structures)}
+
+\paragraph{\code{Buffer}.}
+A growable heap buffer used to accumulate libcurl response chunks.
+Always null-terminated so it can be treated as a C string.
+
+\begin{lstlisting}
+typedef struct {
+    char  *data;
+    size_t size;
+} Buffer;
+\end{lstlisting}
+
+\paragraph{\code{TimeRow}.}
+One swim-time record.  \code{sort\_key} is the swim time in seconds
+(\code{time\_to\_seconds}) used to order rows fastest-first; the
+remaining fields are fixed-size character arrays.  The
+\code{POST /BestTimes} feed (\S\ref{sec:why-bestonly}) populates every
+field; \code{standard} is left empty only when a swim earned no
+motivational standard.
+
+\begin{lstlisting}
+typedef struct {
+    double sort_key;
+    char   time[32];
+    char   date[16];
+    char   standard[48];
+    char   meet[256];
+} TimeRow;
+\end{lstlisting}
+
+\paragraph{\code{Swimmer}.}
+A static configuration record describing how to identify each
+tracked swimmer.  \code{id} is the unique command-line selection
+token (\S\ref{sec:why-ids}); \code{search\_query} and
+\code{match\_substr} resolve the member via \code{GetMembersForFilters};
+\code{date\_min}/\code{date\_max} are an optional age window, retained
+for signature compatibility but not applied online
+(\S\ref{sec:why-bestonly}).  The same physical swimmer may appear in
+\code{SWIMMERS[]} more than once with distinct ids --- this is how the
+three Ledecky age-group views are declared.
+
+\begin{lstlisting}
+typedef struct {
+    const char *id;            /* unique selection id, e.g. "stella" */
+    const char *search_query;  /* member-search "name" value         */
+    const char *match_substr;  /* lowercase substring filter         */
+    const char *date_min;      /* "YYYY-MM-DD" inclusive (or NULL)    */
+    const char *date_max;      /* "YYYY-MM-DD" inclusive (or NULL)    */
+} Swimmer;
+\end{lstlisting}
+
+\paragraph{Database schema (\texttt{schema.sql}).}
+Persisted rows live in the \texttt{swim\_times} table, whose
+columns mirror the seven fields written by the DB-pipe emitter
+plus an identity primary key and a \texttt{fetched\_at}
+timestamp.  A UNIQUE constraint on
+\texttt{(swimmer, event, swim\_time, swim\_date, meet)} prevents
+duplicate inserts on repeated \code{store} runs (REQ-F-73).
+Two indexes (\texttt{(swimmer, event)} and
+\texttt{(event, sort\_key)}) accelerate the \code{offline}
+\texttt{SELECT} (REQ-F-71) which filters on swimmer name and
+event code and orders by \texttt{sort\_key}.
+
+\paragraph{Global state.}
+Module-level variables hold parsed command-line state and the
+best-times cache:
+
+\begin{itemize}
+  \item \code{g\_opts} --- bitmask of behaviour \code{OPT\_*} flags
+        (\code{fastest}, \code{csv}, \code{store}, \code{offline}).
+  \item \code{g\_sel[MAX\_SEL]}, \code{g\_nsel} --- selected swimmer
+        ids; empty means ``all swimmers''.
+  \item \code{g\_events[NUM\_EVENTS][32]}, \code{g\_nevents} ---
+        user-requested event codes and their count.
+  \item \code{g\_cache\_member}, \code{g\_cache[]}, \code{g\_cache\_n}
+        --- the per-member best-times cache: one \code{TimeRow} per
+        event, filled by \code{build\_member\_cache} from the
+        \code{POST /BestTimes} responses and keyed by the memberId
+        currently being processed.
+\end{itemize}
+
+% --------------------------- 4.5 ---------------------------------
+\subsection{Interface view}
+
+\paragraph{Command-line interface.}
+\begin{itemize}
+  \item \code{-o token[,token\ldots]} --- behaviour keywords and/or
+        swimmer ids (see \S\ref{sec:why-ids}).
+  \item \code{-e event[,event\ldots]} --- restrict to event codes;
+        repeatable.
+\end{itemize}
+
+\paragraph{HTTP interface.}
+Two endpoints on \code{https://times-api.usaswimming.org/swims/%
+TimesSearch} are consumed (skipped under \code{offline}):
+\begin{itemize}
+  \item \code{POST /GetMembersForFilters} --- resolve a name to a
+        \code{memberId} (body \code{\{"name":"\dots"\}}).
+  \item \code{POST /BestTimes} --- best time per course for one
+        stroke-and-distance pair (body
+        \code{\{"memberId":"\dots","strokeAbbreviation":"\dots",%
+        "distance":n\}}); each record carries \code{eventCode},
+        \code{swimTime}, \code{swimDate}, \code{meetName}, and
+        \code{timeStandard}.  Issued once per distinct pair.
+\end{itemize}
+
+Every request carries \code{Content-Type: application/json} plus the
+anonymous data-hub auth headers \code{Usas-Sub-Id: Anonymous},
+\code{AppName: DataHub}, and a run-time-generated \code{Device-Id}
+(\S\ref{sec:why-anon}); there is no bearer token.
+
+\paragraph{Database interface.}
+Postgres is reached \emph{programmatically} through the
+\texttt{libpq} client library (\req{REQ-I-12}) --- no
+\texttt{psql} child process and no shell wrapper.  The
+connection string is taken from
+\texttt{SWIM\_TIMES\_PGCONNINFO} when set, otherwise the
+default keyword string
+\texttt{dbname=swim-times user=postgres host=localhost port=5432}.
+A single \code{PGconn} is opened in \code{db\_open} and reused
+for the lifetime of the run.  Two access patterns are needed:
+\begin{itemize}
+  \item Write (\code{store}): a prepared statement
+        \texttt{INSERT INTO swim\_times (\dots) VALUES
+        (\$1\dots\$7) ON CONFLICT (swimmer, event, swim\_time,
+        swim\_date, meet) DO NOTHING}, executed once per row via
+        \code{PQexecPrepared}.  Per-row inserts (rather than a
+        single \texttt{COPY}) let \texttt{ON~CONFLICT~DO~NOTHING}
+        absorb duplicates one at a time without rolling back the
+        whole batch (\req{REQ-F-75}).
+  \item Read (\code{offline}): one parameterised
+        \texttt{SELECT \dots\ FROM swim\_times WHERE swimmer
+        ILIKE \$1 AND event = \$2} per event via
+        \code{PQexecParams}; tuples are read with
+        \code{PQgetvalue}.
+\end{itemize}
+
+\paragraph{Standard output.}
+Either a CSV stream (header line followed by data lines) or a
+plain-text table (per-event heading, column header, separator,
+data rows, blank line).
+
+% --------------------------- 4.6 ---------------------------------
+\subsection{Interaction view}
+
+A typical invocation flows through the following sequence:
+
+\begin{enumerate}
+  \item \code{main} parses \code{-o} / \code{-e} via \code{getopt}.
+  \item Unless \code{offline} is set, \code{main} initialises
+        libcurl (\code{curl\_global\_init}).
+  \item If either \code{store} or \code{offline} is set,
+        \code{main} calls \code{db\_open} which opens a libpq
+        connection (\code{PQconnectdb}) and prepares the
+        idempotent \code{INSERT \dots\ ON~CONFLICT~DO~NOTHING}
+        statement.  Failure under \code{offline} is fatal;
+        failure under \code{store} only is logged and persistence
+        is silently disabled.
+  \item For each entry in \code{SWIMMERS} selected by
+        \code{g\_sel} (all, if none), the dispatcher chooses the
+        online or offline path:
+        \begin{enumerate}
+          \item \emph{Online.} \code{lookup\_member\_id} issues
+                one POST and returns the \code{memberId}.
+                \code{fetch\_times} builds that member's best-times
+                cache once (one \code{POST /BestTimes} per distinct
+                stroke-and-distance pair), then for each requested
+                event (or all default events) selects the matching
+                best time into a \code{TimeRow}, sorts, and emits to
+                stdout, the DB, or both per the option mask.
+          \item \emph{Offline.} \code{offline\_fetch} runs a
+                parameterised \texttt{SELECT \dots\ FROM swim\_times}
+                via \code{PQexecParams} for each event, copies
+                each tuple into a \code{TimeRow} array, applies
+                the date window, sorts, and emits.  No HTTP is
+                performed; no child process is spawned.
+        \end{enumerate}
+  \item \code{main} calls \code{db\_close} (no-op when no
+        connection was opened) and, unless \code{offline}, also
+        calls \code{curl\_global\_cleanup} before exiting.
+\end{enumerate}
+
+% --------------------------- 4.7 ---------------------------------
+\subsection{Algorithm view}
+
+\paragraph{JSON scanning.}
+\code{scan\_string} locates the next occurrence of the literal
+\code{"key"}, advances past the colon and any whitespace, expects
+a double-quote, and copies bytes until the matching closing quote
+into the output buffer.  It advances an in/out position pointer so
+that sequential scans walk forward through the response without
+rescan, which is how \code{Parse BestTimes records} reads the fixed
+\code{meetName}, \code{eventCode}, \code{swimDate}, \code{swimTime},
+\code{timeStandard} field order of each record.  Every value the
+program needs is a JSON string, so no numeric scanner is required.
+
+\paragraph{Sort.}
+\code{insertion\_sort} performs an in-place ascending sort of a
+\code{TimeRow} array by \code{sort\_key}.  Chosen over heap or
+quick sort because $n$ rarely exceeds 50 and insertion sort has
+no recursion, no auxiliary memory, and trivial correctness.
+
+\paragraph{Date reformat.}
+\code{normalize\_date} converts the API's \code{"Mon DD, YYYY"} date
+to ISO \code{YYYY-MM-DD} with a single \code{sscanf} and a
+month-abbreviation lookup, bounding each field so the ten-byte result
+always fits its buffer.  ISO order is lexical (so it sorts correctly),
+contains no comma (so CSV needs no extra quoting), and matches the form
+the offline path reconstructs with \code{to\_char}.
+
+% --------------------------- 4.8 ---------------------------------
+\subsection{Resource view}
+
+\paragraph{Memory.}
+Per-event peak memory is bounded by
+$\code{MAX\_TIMES} \times \mathtt{sizeof}(\code{TimeRow})$
+(approximately 70~KiB per event), plus the response buffer
+(typically 30--80~KiB).  Buffers are freed at end of each
+\code{fetch\_times} call; no long-lived heap state accumulates
+across events.
+
+\paragraph{Network.}
+Each invocation issues at most one member-search POST plus one
+best-times GET per selected swimmer (the best-times response is
+cached and reused across that swimmer's events).  All connections are
+short-lived; libcurl manages connection reuse internally where the
+easy-interface allows.
+
+\paragraph{Credentials.}
+No credential is stored anywhere.  The anonymous data-hub headers
+(\S\ref{sec:why-anon}) are assembled on each request and the
+\code{Device-Id} is generated at run time by \code{device\_id()};
+there is no static token to store or rotate.
+
+% =================================================================
+\section{Design Rationale}
+% =================================================================
+
+\subsection{Why CWEB?}
+
+CWEB satisfies \req{REQ-A-04} (self-documentation) directly: the
+typeset \code{swim-times.pdf} is the program's reference
+documentation.  Equivalent C-with-comments would have required
+maintaining design prose in a separate document, with the
+inevitable drift between code and documentation that the
+Parnas--Clements paper warns against.
+
+\subsection{Why no JSON library?}
+
+Adding \code{cJSON} or \code{jansson} would introduce a build
+dependency and would obscure the small, focused parsing logic
+that actually serves the program.  The response shape is
+stable and the scanner has fewer than fifty lines of code; the
+cost of a custom scanner is therefore lower than the cost of a
+third-party dependency.  The scanner is deliberately format-agnostic:
+it locates a quoted key and returns the value immediately following.
+That contract held for the old Sisense JAQL arrays of
+\code{\{"text":\dots\}}/\code{\{"data":\dots\}} cells and holds equally
+for the current REST responses of named fields
+(\code{"memberId"}, \code{"fullName"}, \code{"swimTime"}, \dots),
+so the migration of \S\ref{sec:why-rest} reused it verbatim.
+
+\subsection{Why the REST times API, not Sisense JAQL?}
+\label{sec:why-rest}
+
+The program was originally built against the Sisense JAQL analytics
+API at \code{usaswimming.sisense.com} (a person-search cube and a
+times Elasticube, each queried with a bearer token).  The USA~Swimming
+data hub has since been rebuilt as a single-page app that talks to a
+family of first-party REST services
+(\code{times-api}, \code{person-api}, \code{meet-api},
+\code{security-api}) behind an Azure API-management gateway; the
+Sisense path is decommissioned for public use --- its embedded token
+now returns \code{401 db\_unauthorized} and the current front-end
+exposes no Sisense credential at all.  The fetch path was therefore
+migrated to the public times service:
+
+\begin{itemize}
+  \item \code{POST /swims/TimesSearch/GetMembersForFilters} with body
+        \code{\{"name":"\dots"\}} resolves a name to a member record
+        carrying a \code{memberId} (an alphanumeric token such as
+        \code{6CD35348E5824C}, replacing the old numeric
+        \code{PersonKey});
+  \item \code{POST /swims/TimesSearch/BestTimes} with body
+        \code{\{"memberId":"\dots","strokeAbbreviation":"\dots",%
+        "distance":n\}} returns that member's best time in each course
+        (SCY and~LCM) for that stroke-and-distance pair, with swim
+        date, meet name, and motivational standard
+        (\S\ref{sec:why-bestonly}).
+\end{itemize}
+
+\noindent The endpoint contract was recovered from the site's
+OpenAPI specification
+(\code{https://times-api.usaswimming.org/swagger/v1/swagger.json})
+and from its front-end bundle, then confirmed against the live service.
+
+\subsection{Why anonymous headers, not a bearer token?}
+\label{sec:why-anon}
+
+The REST services do not use a bearer token for public data.  The
+front-end's fetch wrapper authenticates every call with three custom
+headers: \code{Usas-Sub-Id} (the caller's subject id, or the literal
+\code{Anonymous} when not signed in), \code{AppName: DataHub}, and a
+\code{Device-Id}.  The \code{Device-Id} is the only non-trivial part:
+the server rejects a bare UUID (``\code{Invalid Device-Id format}''),
+requiring the exact shape the browser produces --- base64 of
+\code{"<platform> - <vendor> - <fingerprint> - <millis>"}, with the
+first five base64 characters repeated after the fifteenth.
+\code{device\_id()} reproduces that transformation over a per-run
+fingerprint (process id plus clock); the server validates only the
+format, not that the id is registered, so this is sufficient.  Because
+the credential is generated at run time, there is nothing to embed and
+nothing to rotate: the ``dynamically obtained valid token''
+requirement is met by construction, and the failure mode of the old
+static token (silent \code{401} after rotation) cannot recur.
+
+\subsection{Why the \code{BestTimes} query, and how date, meet, and standard are recovered}
+\label{sec:why-bestonly}
+
+Two anonymous best-times feeds exist.  The lightweight
+\code{GET /GetBestTimesForMember/\{memberId\}} returns one row per event
+carrying only stroke, distance, course, and time --- no date, meet, or
+standard --- and the program originally used it, leaving those three
+\code{TimeRow} fields empty.  Requirements~\#1 and~\#2 of
+\code{requirements6.txt} require each reported time to include its date,
+its meet, and the \code{B}/\code{BB}/\code{A}/\code{AA}/\code{AAA}/%
+\code{AAAA} standard attained, so the fetch path was moved to the
+heavier \code{POST /swims/TimesSearch/BestTimes} query.  That query ---
+the same one the data-hub ``Best~Times'' page issues --- is still
+anonymous (it needs no signed-in subject), but its response records
+carry \code{eventCode}, \code{swimTime}, \code{swimDate},
+\code{meetName}, and \code{timeStandard}.  The still-richer per-swim
+endpoints (\code{GetAllTimesForFilters}, \code{GetSwimmerMeets}, and
+\code{person-api}'s \code{Person/search}) remain \code{403} for
+anonymous callers and are not required for best-time reporting.
+
+\code{BestTimes} keys on a single stroke-and-distance pair, so
+\code{build\_member\_cache} issues one POST per distinct pair in the
+effective event list (about twenty-two for the full thirty-one-event
+roster, since each call returns both courses) and stores the parsed
+rows in a per-member cache (\code{g\_cache}, keyed by
+\code{g\_cache\_member}).  The per-event loop in \code{main} then reads
+from that cache, so no event triggers a fresh network call.  Swim dates
+arrive as \code{"Mon DD, YYYY"} and are normalised to ISO
+\code{YYYY-MM-DD} by \code{normalize\_date} for lexical sorting,
+comma-free CSV, and agreement with the offline read path.
+\code{db\_insert\_row} still passes an empty field as SQL \code{NULL},
+which now happens only for \code{standard} when a swim earned no
+motivational standard; \code{schema.sql} accordingly keeps that column
+nullable.
+
+\subsection{Why id-based swimmer selection?}
+\label{sec:why-ids}
+
+The original design mapped each swimmer to a distinct bit
+(\code{OPT\_STELLA}, \code{OPT\_KALEA}, \dots) in a single \code{int}
+option word shared with the behaviour flags.  Extending the roster to
+the full CAST squad would have overflowed that word.  Each
+\code{Swimmer} now carries a unique string \code{id}; any \code{-o}
+token that is not one of the four behaviour keywords (\code{fastest},
+\code{csv}, \code{store}, \code{offline}) is treated as a swimmer id
+and collected in \code{g\_sel}.  Selection is then a string match
+against \code{SWIMMERS[].id}, with an empty selection meaning ``all''.
+The roster can grow without touching the flag word, and the legacy
+keywords (\code{stella}, \code{kalea}, \dots) continue to work because
+they are simply the ids of the original entries.
+
+\subsection{Why insertion sort?}
+
+\req{D-5} addresses this directly.  The complexity argument is
+not just about wall-clock time---it is about reading the code:
+twelve lines of insertion sort can be verified by eye, whereas a
+heap sort cannot.  For $n < 100$ the wall-clock difference is
+imperceptible.
+
+\subsection{Why one binary, not two?}
+
+A separate person-search utility was considered but rejected.
+The two queries (person search, times query) are always issued
+together, and splitting them would force the caller to thread
+the \code{PersonKey} through the shell, complicating every
+invocation for no gain.
+
+\subsection{Why \texttt{libpq} (programmatic), not \texttt{psql}?}
+
+Earlier revisions reached Postgres by spawning a child
+\texttt{psql} (via \texttt{pg.sh}) and either piping CSV into
+\texttt{COPY \dots\ FROM~STDIN} or capturing pipe-separated
+\texttt{SELECT} output.  Requirement~\#3 of
+\texttt{requirements4.txt} reverses that decision: ``Access the
+Postgres database programmatically, not through scripts.''  The
+revised design therefore links \texttt{libpq} (Postgres's C
+client library, autodetected via \texttt{pg\_config} in the
+Makefile) and reaches the database through the standard
+\code{PQ*} call surface --- \code{PQconnectdb},
+\code{PQprepare}, \code{PQexecPrepared}, \code{PQexecParams}.
+This (a)~eliminates the shell quoting and \texttt{popen}
+\texttt{SIGPIPE} hazards of the previous design,
+(b)~lets duplicate inserts be absorbed one row at a time by an
+\texttt{ON~CONFLICT~DO~NOTHING} clause without aborting the
+batch (the \texttt{COPY} path could not), and (c)~replaces the
+brittle pipe-separated \texttt{SELECT} output with binary-safe
+\code{PGresult} field access.  The cost is one new link-time
+dependency on \code{libpq}; the SRS allowlist (\req{REQ-D-04})
+is updated accordingly.
+
+\subsection{Why per-row \texttt{INSERT \dots\ ON~CONFLICT}, not \texttt{COPY}?}
+
+Requirement~\#4 of \texttt{requirements4.txt} demands that the
+program ``check for duplicates before adding information \dots\
+and recover appropriately if data already present.''  A bulk
+\texttt{COPY \dots\ FROM~STDIN} cannot satisfy this: the first
+row that violates the unique constraint aborts the entire
+transaction, taking with it every subsequently-streamed row.
+Switching to per-row \texttt{INSERT \dots\ ON CONFLICT
+(swimmer, event, swim\_time, swim\_date, meet) DO NOTHING}
+makes each insert independently idempotent: a duplicate is a
+silent no-op, the run exits~0, nothing is written to standard
+error, and any genuinely-new rows in the same invocation are
+still persisted.  The cost is $N$ round trips instead of one
+streamed transaction, but $N$ is at most a few hundred per
+invocation and each insert completes in well under a
+millisecond against the local container.
+
+\subsection{Why a date-window field on \texttt{Swimmer}?}
+
+\code{ledecky10}, \code{ledecky12}, and \code{ledecky14} originally
+demanded age-bracket filtering, expressed as a \code{date\_min}/%
+\code{date\_max} window on each \code{Swimmer} record rather than as a
+separate command-line flag, so the per-swimmer policy lived in one
+place and new historical comparisons were additive.  The fields are
+retained on the record and in the \code{fetch\_times} signature for
+compatibility, but they are not applied to the online fetch: the
+\code{BestTimes} query (\S\ref{sec:why-bestonly}) returns a single
+lifetime best per course, so the three Ledecky entries currently
+resolve to the same best-times set.  The swim date is now reported for
+each of those bests; restoring true age-bracket \emph{filtering} would
+require the signed-in richer-times endpoint noted in
+\S\ref{sec:why-bestonly}, whose per-swim history could be narrowed to a
+date window.
+
+\vfill
+\begin{center}
+  \small\textit{End of document CAST-SDD-001 Rev.\,2.0}
+\end{center}
+
+\end{document}

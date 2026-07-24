@@ -1,0 +1,4 @@
+1.  Is there an API available to obtain all of a swimmers
+previous times at the USA swim database?  Write a LaTeX document
+detailing your findings.
+

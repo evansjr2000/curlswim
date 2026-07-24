@@ -1,0 +1,481 @@
+% swim-times-stp.tex
+% Software Test Plan for the swim-times program
+% ISO/IEC/IEEE 29119-3:2021 Test Plan structure
+% Compiled with: pdflatex swim-times-stp.tex
+
+\documentclass[12pt]{article}
+
+\usepackage{geometry}
+\geometry{letterpaper, margin=1in}
+
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+
+\definecolor{castblue}{RGB}{0,48,135}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\small College Area Swim Team}
+\fancyhead[R]{\small STP: swim-times}
+\fancyfoot[C]{\thepage}
+
+\titleformat{\section}{\large\bfseries\color{castblue}}{\thesection}{0.5em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\req}[1]{\texttt{#1}}
+
+\begin{document}
+
+% -----------------------------------------------------------------
+% Title block
+% -----------------------------------------------------------------
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  {\Huge\bfseries\color{castblue} Software Test Plan\\[0.5em]}
+  {\Large swim-times: Automated Swimmer-Times Retrieval System}\\[2em]
+  {\large College Area Swim Team (CAST)}\\[0.5em]
+  {\normalsize Prepared for: CAST Coaching Staff and Maintainers}\\[0.5em]
+  {\normalsize Prepared by: CAST Technology Working Group}\\[2em]
+  \begin{tabular}{ll}
+    Document identifier: & CAST-STP-001                                       \\
+    Revision:            & 2.0                                                \\
+    Date:                & July 11, 2026                                     \\
+    Status:              & Released                                           \\
+    Governing standard:  & ISO/IEC/IEEE 29119-3:2021 (Test Documentation)     \\
+  \end{tabular}
+  \vfill
+  {\small\textit{This document is prepared in accordance with the principles
+  of rational documentation articulated in D.\,L.\,Parnas and P.\,C.\,Clements,
+  ``A Rational Design Process: How and Why to Fake It,''
+  \textit{IEEE Transactions on Software Engineering}, vol.\,SE-12, no.\,2,
+  pp.\,251--257, February 1986.}}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+% =================================================================
+\section{Introduction}
+% =================================================================
+
+\subsection{Document identifier}
+
+CAST-STP-001 Rev.\,1.0, \textit{Software Test Plan: swim-times}.
+
+\subsection{Purpose}
+
+This Software Test Plan (STP) specifies how the requirements
+defined in CAST-SRS-001 shall be verified by execution.  It
+identifies the test items, the test sub-processes, the test
+environment, the pass/fail criteria, the deliverables, the
+schedule, and the staffing.  The plan is the binding agreement
+between development and acceptance regarding what constitutes a
+successful test run prior to release.
+
+\subsection{Scope}
+
+This STP covers verification of the swim-times executable that
+is tangled out of \code{swim2/swim-times.w}.  It does not cover
+verification of upstream USA~Swimming data, the data-hub REST
+back-end,
+or the unrelated Pandoc-based PDF report at \code{swim/swim-times.md}.
+
+\subsection{References}
+
+\begin{enumerate}[label={[\arabic*]}]
+  \item ISO/IEC/IEEE 29119-3:2021, \textit{Software and systems
+        engineering---Software testing---Part 3: Test documentation}.
+  \item ISO/IEC/IEEE 29148-2018, \textit{Systems and software engineering---
+        Life cycle processes---Requirements engineering}.
+  \item D.\,L.\,Parnas and P.\,C.\,Clements, ``A Rational Design Process:
+        How and Why to Fake It,'' \textit{IEEE Trans.\ Software Eng.},
+        vol.\,SE-12, no.\,2, pp.\,251--257, Feb.\ 1986.
+  \item CAST-CONOPS-001 Rev.\,1.0, \textit{Concept of Operations:
+        swim-times}, April 21, 2026.
+  \item CAST-SRS-001 Rev.\,1.0, \textit{Software Requirements
+        Specification: swim-times}, April 22, 2026.
+  \item CAST-SDD-001 Rev.\,1.0, \textit{Software Design Document:
+        swim-times}, April 22, 2026.
+  \item \code{swim2/test-swim-times.sh} --- automated test script
+        that implements the test cases enumerated in this plan.
+\end{enumerate}
+
+% =================================================================
+\section{Test Context}
+% =================================================================
+
+\subsection{Project background}
+
+swim-times is a single-binary command-line utility that retrieves
+swim times from the USA~Swimming data hub via its public REST API.
+The full operational context is described in CAST-CONOPS-001.
+
+\subsection{Test items}
+
+\begin{itemize}
+  \item The CWEB literate source \code{swim2/swim-times.w} (the
+        canonical source of record).
+  \item The tangled C source \code{swim2/swim-times.c} (a build
+        artefact).
+  \item The compiled executable \code{swim2/swim-times}.
+  \item The cwebmac-typeset documentation PDF
+        \code{swim2/swim-times.pdf}.
+\end{itemize}
+
+\subsection{Test scope}
+
+\paragraph{In scope.}
+All requirements tagged \req{REQ-F-*}, \req{REQ-I-*}, \req{REQ-P-*},
+\req{REQ-D-*}, and \req{REQ-A-*} in CAST-SRS-001.
+
+\paragraph{Out of scope.}
+\begin{itemize}
+  \item The accuracy of data returned by USA~Swimming (treated as
+        an authoritative external system).
+  \item The cwebmac LaTeX macros and their typesetting choices.
+  \item Performance under network outage or DNS failure (these
+        are operator-environment conditions).
+\end{itemize}
+
+\subsection{Assumptions and constraints}
+
+\begin{itemize}
+  \item The test host has outbound HTTPS access to
+        \texttt{times-api.usaswimming.org}.
+  \item The anonymous data-hub REST services remain reachable
+        (member search and \code{BestTimes}) on the day the test is
+        executed; no credential is required.
+  \item The four tracked swimmers continue to exist in the
+        USA~Swimming member directory.
+  \item POSIX utilities (\code{awk}, \code{grep}, \code{diff},
+        \code{curl}, \code{otool} or \code{ldd}) are available.
+\end{itemize}
+
+\subsection{Stakeholders}
+
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  \textbf{Role}            & \textbf{Concern}                              \\
+  \midrule
+  Maintainer (developer)   & Timely detection of regressions               \\
+  Coach (operator)         & Behavioural correctness of CLI                \\
+  Auditor                  & Traceability from SRS to evidence             \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+% =================================================================
+\section{Communication}
+% =================================================================
+
+Test results are written to standard output by
+\code{test-swim-times.sh} as PASS/FAIL/SKIP lines, followed by a
+summary count.  A non-zero exit status from the script indicates
+test failure and shall be treated as a release blocker by the
+maintainer.  No external defect-tracking system is required at
+present; failures are recorded as GitHub issues against the
+project repository.
+
+% =================================================================
+\section{Risk Register}
+% =================================================================
+
+\begin{center}
+\begin{longtable}{p{4.0cm}p{1.5cm}p{1.5cm}p{6cm}}
+  \toprule
+  \textbf{Risk} & \textbf{Likeli-} & \textbf{Impact} & \textbf{Mitigation} \\
+                & \textbf{hood}     &                  & \\
+  \midrule\endhead
+  Device-Id format rejected by server
+            & Low  & High & \code{device\_id()} updated to match the
+                            current data-hub format; recompile and
+                            re-run STP. \\
+  REST response schema change
+            & Low  & High & Test script's \req{REQ-F-32} probe
+                            detects parse failure on first run. \\
+  Network outage during test
+            & Med  & Low  & Online tests \texttt{SKIP} cleanly;
+                            offline tests still run. \\
+  USA Swimming renames or drops a tracked swimmer
+            & Low  & Med  & \req{REQ-F-60} test catches
+                            person-lookup failure. \\
+  Test host lacks \code{libcurl}
+            & Low  & High & Build phase fails fast; STP cannot
+                            continue. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+% =================================================================
+\section{Test Strategy}
+% =================================================================
+
+\subsection{Test sub-processes}
+
+Testing is decomposed into five sub-processes, executed in order
+by \code{test-swim-times.sh}:
+
+\begin{description}[style=nextline]
+  \item[Build sub-process.]
+        \code{make tangle compile} produces a fresh executable.
+        Failure here aborts the run.
+  \item[Static sub-process.]
+        Source-code and binary inspection verifies design
+        constraints (\req{REQ-D-*}) and self-documentation
+        (\req{REQ-A-04}).
+  \item[Offline behaviour sub-process.]
+        CLI exit-status and usage-text checks (\req{REQ-F-03},
+        \req{REQ-F-04}) require no network.
+  \item[Online behaviour sub-process.]
+        Functional, performance, and reliability checks issue real
+        REST requests against the data-hub times service.  Skipped
+        cleanly when network is unreachable or the operator sets
+        \code{SWIM\_TIMES\_SKIP\_NETWORK=1}.
+  \item[Database persistence sub-process.]
+        \req{REQ-F-70} \dots\ \req{REQ-F-75} exercise the
+        \code{store} write path and the \code{offline} read path
+        against a local Postgres container.  The application
+        binary reaches the database programmatically through the
+        \texttt{libpq} client library (\req{REQ-I-12}) using a
+        connection string taken from
+        \texttt{SWIM\_TIMES\_PGCONNINFO} or the default
+        \texttt{dbname=swim-times user=postgres host=localhost
+        port=5432}.  The companion bash helper \code{test-db.sh}
+        starts the container via \texttt{pg.sh}, applies
+        \texttt{schema.sql}, and prints a summary of
+        \texttt{swim\_times}; bash test-driver scripts may
+        continue to use \texttt{pg.sh psql} for setup/teardown
+        because that constraint applies only to the application
+        binary, not to test infrastructure.  Tests are skipped
+        cleanly when the database cannot be reached.
+\end{description}
+
+\subsection{Test design techniques}
+
+\begin{description}[style=nextline]
+  \item[Specification-based.]
+        Each functional requirement in the SRS yields one or more
+        test cases driven by inspection of program output.
+  \item[Boundary value.]
+        \code{-o} with all four swimmers and \code{-e} with all
+        thirty-one default events exercise the upper bound of
+        each input domain.
+  \item[Equivalence partition.]
+        Single-swimmer and single-event invocations represent the
+        ``one of many'' equivalence class.
+  \item[Static analysis.]
+        Compiler warnings (\code{-Wall}), CWEB chunk line-count
+        audit, and binary dependency inspection enforce the
+        \req{REQ-D-*} constraints.
+\end{description}
+
+\subsection{Test environment}
+
+\begin{itemize}
+  \item Host: any POSIX.1-2008 system with C99 toolchain,
+        \code{libcurl} 7.0+, \code{cweb}, \code{pdftex}, and
+        \code{bash} 4+.
+  \item Reference development host: macOS 14 with Homebrew
+        \code{curl} and TeX~Live~2025.
+  \item Network: outbound HTTPS to
+        \texttt{usaswimming.sisense.com}.
+  \item Optional Postgres container managed by the project's
+        \texttt{pg.sh} wrapper script (Docker required); only
+        the database persistence tests depend on it.  In its
+        absence those tests skip and the run still gates on the
+        remaining suites.
+\end{itemize}
+
+\subsection{Test data}
+
+The five production swimmer records and the thirty-one
+production event codes serve as test data for the online
+suites.  The database persistence suite uses whatever rows the
+\code{store} sub-test inserts in the same run; no fixture file
+is checked in.  No synthetic REST data is required because
+the system under test is read-only against a live read-only API.
+
+\subsection{Item pass/fail criteria}
+
+\begin{itemize}
+  \item A test passes if its \code{PASS} line is printed.
+  \item A test fails if its \code{FAIL} line is printed.
+  \item A test is skipped (\code{SKIP}) when its preconditions
+        cannot be met (e.g., no network).  Skipped tests do not
+        block release but are tracked.
+  \item The release gate is: zero \code{FAIL} and the count of
+        \code{SKIP} not exceeding the online-test count when run
+        in offline mode.
+\end{itemize}
+
+\subsection{Suspension criteria and resumption requirements}
+
+Testing is suspended if:
+
+\begin{itemize}
+  \item The build sub-process fails (cannot proceed without a
+        binary).
+  \item More than three consecutive online tests fail with
+        identical HTTP error codes (suggests a data-hub-side
+        outage rather than an SUT defect).
+\end{itemize}
+
+Testing resumes once the underlying condition is corrected; the
+full STP shall be re-run from scratch, not partially.
+
+\subsection{Test deliverables}
+
+\begin{itemize}
+  \item This Test Plan (CAST-STP-001).
+  \item The automated test script \code{swim2/test-swim-times.sh}.
+  \item Per-run console output captured by the operator
+        (recommended: \code{./test-swim-times.sh | tee run.log}).
+  \item Updated risk register entries when new failure modes
+        are observed.
+\end{itemize}
+
+% =================================================================
+\section{Test Schedule}
+% =================================================================
+
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  \textbf{Trigger}                              & \textbf{Action}                  \\
+  \midrule
+  Any change to \code{swim-times.w}             & Run STP before commit            \\
+  Data-hub \code{Device-Id} format changes       & Run STP after recompile          \\
+  USA Swimming schema change announced          & Run STP, update tests if needed  \\
+  Quarterly maintenance window                  & Run STP unconditionally          \\
+  Pre-release of a tagged version               & Run STP; archive run log         \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+% =================================================================
+\section{Staffing and Roles}
+% =================================================================
+
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  \textbf{Role}        & \textbf{Responsibility}                                \\
+  \midrule
+  Maintainer           & Run STP; resolve any \code{FAIL}; update tests when
+                         requirements change                                    \\
+  Coach (acceptance)   & Verify behavioural tests still match operational need \\
+  Reviewer             & Confirm SRS--STP traceability matrix is current       \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+No external test team or specialised training is required.  The
+maintainer who edits \code{swim-times.w} is the same individual
+who runs the STP.
+
+% =================================================================
+\section{Test Cases and Traceability}
+% =================================================================
+
+The table below maps every requirement in CAST-SRS-001 to the
+test case in \code{test-swim-times.sh} that verifies it.  Each
+row also gives the test method (D = Demonstration, I = Inspection,
+T = Test, A = Analysis).
+
+\begin{center}
+\begin{longtable}{p{2.6cm}p{1.0cm}p{8.4cm}}
+  \toprule
+  \textbf{SRS req.} & \textbf{Method} & \textbf{Test case in script} \\
+  \midrule\endhead
+  \req{REQ-F-01}    & D & Implicit; exercised by every \code{-o} invocation in the suite \\
+  \req{REQ-F-02}    & D & Implicit; exercised by every \code{-e} invocation in the suite \\
+  \req{REQ-F-03}    & D & Empty-invocation test: \code{rc=1} and \code{Usage:} on stderr \\
+  \req{REQ-F-04}    & D & Unknown-flag test: \code{rc=2} and \code{Usage:} on stderr  \\
+  \req{REQ-F-10}    & D & \code{-o stella} restricts output to one swimmer            \\
+  \req{REQ-F-11}    & D & \code{-e ...} with no swimmer keyword yields seven \code{Swimmer:} lines \\
+  \req{REQ-F-12}    & D & \code{stella} keyword resolves to a row containing ``Evans'' \\
+  \req{REQ-F-13}    & D & \code{ledecky10}/\code{ledecky12}/\code{ledecky14} resolve to a row containing ``Katie Genevieve Ledecky'' \\
+  \req{REQ-F-14}    & I & \code{ledecky10} window [2006-03-17, 2008-03-16] present on the \code{Swimmer} entry; applied to the offline \texttt{SELECT} \\
+  \req{REQ-F-15}    & I & \code{ledecky12} window [2008-03-17, 2010-03-16] present on the \code{Swimmer} entry \\
+  \req{REQ-F-16}    & I & \code{ledecky14} window [2010-03-17, 2012-03-16] present on the \code{Swimmer} entry \\
+  \req{REQ-F-16a}   & T & Online \code{ledecky10} run reports a best time with a non-empty date \\
+  \req{REQ-F-20}    & D & Single-event \code{-e} yields exactly one event section    \\
+  \req{REQ-F-21}    & D & No \code{-e} yields 31 event sections                      \\
+  \req{REQ-F-22}    & D & Event-list count honoured (subset of \req{REQ-F-20})        \\
+  \req{REQ-F-30}    & D & Successful baseline run produces a \code{Swimmer:} line     \\
+  \req{REQ-F-31}    & D & Successful baseline run produces an event section          \\
+  \req{REQ-F-32}    & T & Table row carries a non-empty date, standard, and meet for a known swim \\
+  \req{REQ-F-33}    & A & One \code{BestTimes} POST per stroke-and-distance pair verified by source inspection \\
+  \req{REQ-F-40}    & T & Insertion-sort fastest-first verified on baseline output   \\
+  \req{REQ-F-41}    & D & \code{fastest} mode prints exactly one data row            \\
+  \req{REQ-F-42}    & T & All dates match \code{YYYY-MM-DD} regex                    \\
+  \req{REQ-F-50}    & D & Heading + column header + separator detected               \\
+  \req{REQ-F-51}    & D & CSV header line + at least one data line                   \\
+  \req{REQ-F-52}    & D & Empty-event probe yields \code{(no times found)} (else SKIP) \\
+  \req{REQ-F-60}    & I & Lookup-failure path inspected in \code{lookup\_member\_id} \\
+  \req{REQ-F-61}    & I & Per-event failure-then-continue inspected in \code{fetch\_times} \\
+  \req{REQ-F-70}    & T & \code{store,csv} run inserts $\geq$1 row into \texttt{swim\_times} and prints CSV (DB-gated) \\
+  \req{REQ-F-71}    & T & \code{offline,csv} run reads $\geq$1 previously stored row (DB-gated) \\
+  \req{REQ-F-72}    & T & \code{offline} run completes with \texttt{SWIM\_TIMES\_SKIP\_NETWORK=1} (DB-gated) \\
+  \req{REQ-F-73}    & T & Repeated \code{store} run leaves \texttt{count(*)} unchanged (DB-gated) \\
+  \req{REQ-F-74}    & I & Missing-\texttt{libpq}-connection warning path inspected in \code{db\_open} \\
+  \req{REQ-F-75}    & T & Re-\code{store} run exits 0 with no stderr (ON CONFLICT DO NOTHING) (DB-gated) \\
+  \req{REQ-I-01}    & I & No \code{stdin} read in source                              \\
+  \req{REQ-I-10}    & A & \code{otool}/\code{ldd} confirms libcurl link               \\
+  \req{REQ-I-11}    & I & Header strings \code{Content-Type} and \code{Authorization} present in source \\
+  \req{REQ-I-12}    & I & \code{db\_conn\_string} reads \texttt{SWIM\_TIMES\_PGCONNINFO}; binary linkage includes \texttt{libpq} \\
+  \req{REQ-I-20}    & A & \code{https://usaswimming.sisense.com} substring present, no \code{http://} \\
+  \req{REQ-P-01}    & D & Sample timing extrapolated to 160 requests $<$ 300 s        \\
+  \req{REQ-P-02}    & D & Single query measured $<$ 10 s                              \\
+  \req{REQ-P-03}    & D & Offline single query measured $<$ 2 s (DB-gated, manual)    \\
+  \req{REQ-D-01}    & A & Compile under \code{-O2 -Wall} produces no warnings         \\
+  \req{REQ-D-02}    & I & \code{swim-times.c} regenerable from \code{swim-times.w}    \\
+  \req{REQ-D-03}    & A & CWEB chunk line-count audit (awk pass)                     \\
+  \req{REQ-D-04}    & A & Binary dependency list contains only \{libc, libcurl, libpq, TLS, support libs\} \\
+  \req{REQ-D-10}    & I & \texttt{schema.sql} declares \texttt{swim\_times} with the UNIQUE constraint per \req{REQ-F-73} \\
+  \req{REQ-A-01}    & T & Two consecutive runs produce byte-identical output         \\
+  \req{REQ-A-02}    & I & Token and URL declared as named constants                   \\
+  \req{REQ-A-03}    & D & Build on a second POSIX host (manual; quarterly)           \\
+  \req{REQ-A-04}    & D & \code{cweave} + \code{pdftex} produces \code{swim-times.pdf} \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+\noindent
+Tests marked \textbf{I} (Inspection) are recorded in this plan and
+in code review checklists rather than being executed by the
+automated script.  All others are executed by
+\code{test-swim-times.sh}.
+
+% =================================================================
+\section{Approvals}
+% =================================================================
+
+\begin{center}
+\begin{tabular}{lll}
+  \toprule
+  \textbf{Role}                & \textbf{Name}            & \textbf{Date}  \\
+  \midrule
+  Maintainer (author)          & \rule{4cm}{0.4pt}        & \rule{2cm}{0.4pt} \\
+  Coach (acceptance)           & \rule{4cm}{0.4pt}        & \rule{2cm}{0.4pt} \\
+  Reviewer                     & \rule{4cm}{0.4pt}        & \rule{2cm}{0.4pt} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\vfill
+\begin{center}
+  \small\textit{End of document CAST-STP-001 Rev.\,1.0}
+\end{center}
+
+\end{document}

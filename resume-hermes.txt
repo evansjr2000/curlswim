@@ -1,0 +1,20 @@
+Resume this session with:
+  hermes --resume 20260708_020843_d58f66
+  hermes -c "Swim Times Program Requirements Implementation"
+
+Session:        20260708_020843_d58f66
+Title:          Swim Times Program Requirements Implementation
+Duration:       39m 58s
+Messages:       170 (3 user, 165 tool calls)
+
+
+
+Resume this session with:
+  hermes --resume 20260708_020843_d58f66
+  hermes -c "Swim Times Program Requirements Implementation"
+
+Session:        20260708_020843_d58f66
+Title:          Swim Times Program Requirements Implementation
+Duration:       3m 27s
+Messages:       192 (3 user, 187 tool calls)
+evansjr@srv1373152:~/myclaude/curlswim$ 

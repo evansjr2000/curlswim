@@ -1,0 +1,32 @@
+0. Follow the principles outlined in the famous 1886 paper "A Rationale Design Process: How and Why to Fake It".  When
+developing documentation for software.
+
+1. Write a CONOPS in TeX format using the latest IEEE standard for the program implemented by the literate program
+stella-times.w
+
+2.  Standard Components of a ConOps
+A document following the IEEE structure typically includes the following sections:
+
+Scope: Identifies the system and the document's purpose.
+
+Referenced Documents: Any external standards or background materials.
+
+Current System/Situation: Describes the "As-Is" state, including current problems or manual processes.
+
+Justification for Change: Why the new system is needed (e.g., efficiency, new capabilities).
+
+Proposed System: The "To-Be" state, describing high-level capabilities and the operational environment.
+
+Operational Scenarios: Step-by-step "narratives" of how a user would interact with the system to complete a task.
+
+Summary of Impacts: How the new system will change the organization, such as staffing or training needs.
+
+Analysis: Trade-offs considered and why the chosen approach was selected.
+
+3. Write a software System Requirements Specification following the IEEE standard in LaTeX format using the
+principles outlined in the famous 1886 paper "A Rationale Design Process: How and Why to Fake It".
+
+4. Write a software Design Document following the IEEE standard in LaTeX format using the
+principles outlined in the famous 1886 paper "A Rationale Design Process: How and Why to Fake It".
+
+

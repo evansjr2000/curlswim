@@ -1,0 +1,37 @@
+0.  The program fails to compile (on Debian Linux). Fix this issue first.
+
+1.  Add the following users to the program.  Come up with a unique id for each.
+
+ 1. Bothwell, Emma K
+ 2. Coombs, Wally B
+ 3. Cruz, Eva R
+ 4. Darrow, Zoe E
+ 5. Doan, Eva
+ 6. Ellis, Nova L
+ 7. Evans, Stella J
+ 8. Fedyshyn, Liliya P
+ 9. Glass, Layla E
+10. Glass, Logan W
+11. Gosser, Hannah
+12. Huynh, Diamond K
+13. Knuth, Hannah L
+14. Lefebvre-Bailey, Cleo L
+15. Mendez, Giavanna N
+16. Mulvaney, Sofia E
+17. Shay, Naia L
+18. Simmons, Briar R
+19. Simmons, Presley A
+20. Soto, Lucas E
+21. Soto, Vivienne E
+22. Wittmershaus, Addison F
+23. Zahner, Elsie M
+
+2. Check each name for entries in the USA swim database.  Then run the swim-times program to grab all the times
+for each user and put their times in the local Postgres database.
+
+3.  Assume the postgres server is running locally and is accessible  throught the standard ports.
+
+4. Update the SRS with the names and "aliases" of all the swimmers this program is designed to fetch.
+
+5.  Add the option "list", i.e., swim-times -o list, to list out all the named swimmers in the database.
+

@@ -1,0 +1,252 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{parskip}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  framesep=4pt,
+  backgroundcolor=\color{gray!8},
+  showstringspaces=false,
+}
+
+\title{Is There an API to Obtain \emph{All} of a Swimmer's Previous
+Times from the USA~Swimming Database?}
+\author{Findings from the \code{times-api} OpenAPI specification}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Short answer}
+
+\textbf{Yes.} The USA~Swimming data-hub back end (\code{times-api},
+serving \url{https://data.usaswimming.org/datahub/}) exposes a
+first-party REST endpoint whose explicit purpose is to return
+\emph{every} recorded swim for a member, not merely lifetime bests:
+
+\begin{quote}
+\code{POST /swims/TimesSearch/GetAllTimesForFilters}
+\end{quote}
+
+It is complemented by several other endpoints that return full history
+sliced by meet, by season, or in a single flat per-person list. This
+report catalogues each of them, gives request and response shapes, and
+notes how they differ from the best-times endpoints the existing
+\code{swim-times} program currently uses.
+
+\section{Evidence and method}
+
+The findings are drawn from the machine-readable OpenAPI~3.0.4
+specification shipped with this project as
+\code{swim2/swagger.json} (399\,KB, \code{title: times-api},
+\code{version: 1.0}). This is the authoritative contract published by
+the service itself. The document defines 120+ operations under the
+\code{/swims/} prefix; the ones relevant to retrieving an individual
+swimmer's historical times are extracted below.
+
+The spec declares \emph{no} \code{securitySchemes} and \emph{no} global
+\code{security} requirement, which is consistent with the project's
+existing experience that the times endpoints are reachable by anonymous
+callers who supply the three data-hub headers (\code{AppName: DataHub},
+\code{Usas-Sub-Id: Anonymous}, and a client-minted \code{Device-Id})
+rather than a bearer token.
+
+Note: the response shapes below are transcribed from the specification's
+schema definitions. A live call to confirm field-level behaviour was not
+executed for this document; where empirical confirmation matters (e.g.\
+exact pagination limits) it should be verified against the live service.
+
+\section{The primary answer: \code{GetAllTimesForFilters}}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Method \& path & \code{POST /swims/TimesSearch/GetAllTimesForFilters} \\
+Request body   & \code{SFTimesSearchFilters} (JSON) \\
+Response       & array of \code{SFTimesSearchResults} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Unlike the best-times calls, this endpoint is a general times \emph{search}:
+its filter object lets the caller pin a single \code{memberId} and then
+optionally narrow (or not) by event, course, season, date range, age
+range, and time-standard type. Leaving the narrowing fields null returns
+the member's complete history for the requested events/course.
+
+\textbf{Request --- \code{SFTimesSearchFilters}:}
+\begin{lstlisting}
+{
+  "memberId":         string,   // the swimmer
+  "events":           string,   // e.g. "50 FR"; null/broad => all
+  "course":           string,   // "SCY" | "LCM" | "SCM"
+  "seasonKey":        integer,  // null => all seasons
+  "startDate":        string,   // null => no lower bound
+  "endDate":          string,   // null => no upper bound
+  "minAge":           integer,
+  "maxAge":           integer,
+  "timeStandardType": string,
+  "sortBy":           string
+}
+\end{lstlisting}
+
+\textbf{Response --- array of \code{SFTimesSearchResults}, one element
+per swim:}
+\begin{lstlisting}
+{
+  "swimTimeId":   integer,
+  "meetId":       integer,
+  "meetName":     string,
+  "eventCode":    string,
+  "courseCode":   string,
+  "swimDate":     string,
+  "swimmerAge":   integer,
+  "powerPoints":  integer,
+  "swimTime":     string,
+  "timeStandard": string,
+  "clubName":     string
+}
+\end{lstlisting}
+
+Because each element carries its own \code{swimDate}, \code{meetName},
+and \code{timeStandard}, and the array is not collapsed to one row per
+event, this is the endpoint that yields a swimmer's \emph{full
+historical progression} (every heat/final on record), which is exactly
+what the question asks for.
+
+\section{Other endpoints that return full history}
+
+The service offers several complementary ways to obtain all of a
+swimmer's times, differing in how the results are sliced.
+
+\subsection{\code{GET /swims/TimesSearch/MemberTimes}}
+
+A query-string variant with an explicit \code{bestTimesOnly} toggle ---
+setting it false returns all times.
+
+\begin{lstlisting}
+GET /swims/TimesSearch/MemberTimes
+    ?personId={id}
+    &organization=...
+    &eventCourse=SCY|LCM|SCM
+    &session=...
+    &season=...
+    &bestTimesOnly=false        // false => full history
+-> array of SFMemberTimes
+   { fullName, eventCode, swimTime, swimTimeAdj, swimmerAge,
+     powerPoints, timeStandardType, meetName, lscClub, swimDate }
+\end{lstlisting}
+
+The presence of a \code{bestTimesOnly} flag is direct evidence that the
+same backing query can return either the reduced best-times view or the
+complete set.
+
+\subsection{Meet-by-meet drill down}
+
+Two endpoints together reconstruct a swimmer's whole career meet by meet:
+
+\begin{lstlisting}
+GET /swims/TimesSearch/GetSwimmerMeets/{memberId}
+-> array of SFMeet
+   { meetId, meetName, meetType, seasonYear, season, minDate, maxDate,
+     swims, lifetimeBestTimes, seasonBestTimes, courseCode, meetDates }
+
+GET /swims/TimesSearch/GetSwimmerMeetTimes/{memberId}/{meetId}
+-> array of SFSwimmerMeetTime
+   { swimTimeId, eventCode, sessionName, swimTime, timeStandard,
+     timeDrop, finishPosition }
+\end{lstlisting}
+
+\code{GetSwimmerMeets} lists every meet the swimmer has competed in
+(with a \code{swims} count per meet); iterating \code{GetSwimmerMeetTimes}
+over those meet ids yields every individual swim. This is the most
+faithful reproduction of the ``meet results'' view on the public site,
+and uniquely exposes per-swim \code{finishPosition} and \code{timeDrop}.
+
+\subsection{Flat per-person list}
+
+\begin{lstlisting}
+GET /swims/Time/Person/{personId}
+-> array of PersonSwimTime
+   { swimTimeId, swimTime, competitor, eventName, eventCourse, swimDate,
+     session, finishPosition, distance, meetName, orgUnitName,
+     standardName, splits[] }
+
+GET /swims/Time/Mobile/{personId}
+-> array of PersonSwimTimeMobile   // leaner mobile projection
+\end{lstlisting}
+
+\code{Time/Person} returns a single flat array of every swim for the
+person, and notably includes \code{splits[]} (per-length split times)
+for each swim --- the richest per-swim detail of any endpoint here.
+
+\subsection{Individual swim + splits}
+
+\begin{lstlisting}
+GET /swims/TimesSearch/AllTimes/SwimTime/{swimTimeId}
+GET /swims/TimesSearch/SwimmerMeets/SwimTime/{swimTimeId}
+\end{lstlisting}
+
+Given a \code{swimTimeId} harvested from any list above, these fetch a
+single swim's full detail, including splits (\code{SFSwimSplit}:
+cumulative distance, cumulative split time, split time).
+
+\section{Contrast with the best-times endpoints currently used}
+
+The existing \code{swim-times} program uses only the two best-times
+endpoints, which by design collapse history to one row per event:
+
+\begin{center}
+\begin{longtable}{@{}p{0.34\textwidth}p{0.60\textwidth}@{}}
+\toprule
+\textbf{Endpoint} & \textbf{What it returns} \\
+\midrule
+\endhead
+\code{GET .../GetBestTimesForMember/\{id\}} &
+  Lifetime best per event; stroke, distance, course, time \emph{only}
+  (no date, meet, or standard). \code{SFSwimmerBestTime}. \\
+\addlinespace
+\code{POST .../TimesSearch/BestTimes} &
+  Lifetime best per stroke/distance pair \emph{with} date, meet,
+  standard, splits, finish position. \code{SFBestTimesSearchResults}.
+  One row per event. \\
+\midrule
+\code{POST .../GetAllTimesForFilters} &
+  \textbf{All} swims matching the filter --- every historical swim, each
+  with its own date/meet/standard. \code{SFTimesSearchResults}. \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+The best-times endpoints answer ``what is this swimmer's fastest ever
+50~free?''. \code{GetAllTimesForFilters} (and its siblings) answer
+``show me every 50~free this swimmer has ever recorded, when, and where''
+--- the full progression.
+
+\section{Recommendation}
+
+To obtain all of a swimmer's previous times programmatically, use
+\code{POST /swims/TimesSearch/GetAllTimesForFilters} with an
+\code{SFTimesSearchFilters} body that sets \code{memberId} (and
+optionally \code{course}/\code{events}) while leaving the date, season,
+and age filters null. For per-swim split detail, follow up with
+\code{GET /swims/Time/Person/\{personId\}} or resolve individual
+\code{swimTimeId}s. These calls should be reachable with the same
+anonymous data-hub headers (\code{AppName}, \code{Usas-Sub-Id},
+\code{Device-Id}) the project already mints for the best-times calls,
+since the spec defines no authentication scheme; this should be
+confirmed with a live request before relying on it in production.
+
+\end{document}
