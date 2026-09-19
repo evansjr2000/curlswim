@@ -6,3 +6,8 @@ swim-times.scn
 swim-times.toc
 swim-times.tex
 swim-times-*.pdf
+
+# TeX/LaTeX build artefacts
+*.log
+*.aux
+*.out

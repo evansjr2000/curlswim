@@ -8,6 +8,7 @@
 \usepackage{geometry}
 \geometry{letterpaper, margin=1in}
 
+\usepackage[T1]{fontenc}
 \usepackage{hyperref}
 \usepackage{booktabs}
 \usepackage{array}
@@ -16,8 +17,12 @@
 \usepackage{titlesec}
 \usepackage{fancyhdr}
 \usepackage{xcolor}
+\usepackage{listings}
 
 \definecolor{castblue}{RGB}{0,48,135}
+\definecolor{shade}{RGB}{245,246,248}
+
+\hypersetup{colorlinks=true, linkcolor=castblue, urlcolor=castblue}
 
 \pagestyle{fancy}
 \fancyhf{}
@@ -32,10 +37,20 @@
 \newcommand{\code}[1]{\texttt{#1}}
 \newcommand{\req}[1]{\texttt{#1}}
 
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{shade},
+  frame=single,
+  rulecolor=\color{gray!40},
+  framesep=6pt,
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  xleftmargin=0pt
+}
+
 \begin{document}
 
-% -----------------------------------------------------------------
-% Title block
 % -----------------------------------------------------------------
 \begin{titlepage}
   \centering
@@ -47,9 +62,10 @@
   {\normalsize Prepared by: CAST Technology Working Group}\\[2em]
   \begin{tabular}{ll}
     Document identifier: & CAST-STP-001                                       \\
-    Revision:            & 2.0                                                \\
-    Date:                & July 11, 2026                                     \\
+    Revision:            & 6.0                                                \\
+    Date:                & September 18, 2026                                 \\
     Status:              & Released                                           \\
+    Supersedes:          & Revision 5.0, September 18, 2026                    \\
     Governing standard:  & ISO/IEC/IEEE 29119-3:2021 (Test Documentation)     \\
   \end{tabular}
   \vfill
@@ -69,95 +85,204 @@
 
 \subsection{Document identifier}
 
-CAST-STP-001 Rev.\,1.0, \textit{Software Test Plan: swim-times}.
+CAST-STP-001, revision 6.0.  This revision supersedes revision 5.0 in
+its entirety.
 
 \subsection{Purpose}
 
-This Software Test Plan (STP) specifies how the requirements
-defined in CAST-SRS-001 shall be verified by execution.  It
-identifies the test items, the test sub-processes, the test
-environment, the pass/fail criteria, the deliverables, the
-schedule, and the staffing.  The plan is the binding agreement
-between development and acceptance regarding what constitutes a
-successful test run prior to release.
+This plan defines the strategy, environment, design, and case-level
+detail by which \code{swim-times} is verified against the requirements
+of CAST-SRS-001.  It is the companion of the executable suites
+\code{test-swim-times.sh} and \code{test-db.sh}: every case enumerated
+in Section~\ref{sec:cases} is realised by one check in one of those
+scripts, and every check in those scripts appears here.
+
+\subsection{Rationale for this revision}\label{sec:why}
+
+Revision 2.0 assumed something that is no longer true: that the
+USA~Swimming data hub answers times queries from anonymous callers.  It
+does not.  Since 2026 the hub serves reference data anonymously and
+refuses every search and every times query with \code{403 Forbidden}
+unless the caller is signed in.  The investigation is recorded in
+CAST-DR-001.
+
+That change breaks a test plan built on the old assumption in a
+specific and damaging way: the suite reported eighteen failures whose
+common cause was neither a defect nor a test error, and it reported
+them in language that pointed at the program.  A suite that blames the
+software for the world's changes is worse than no suite, because it
+trains its reader to ignore it.
+
+Revision 3.0 therefore adopts a different organising principle, stated
+in full in Section~\ref{sec:tiers}: \textbf{the suite first determines
+what it is permitted to observe, and then tests only what that
+permits}, reporting every remaining case as \code{SKIP} with the actual
+reason.  A \code{FAIL} in revision 3.0 always means a defect in
+\code{swim-times}.
+
+Revision 3.0 also added coverage that revision 2.0 lacked entirely: the
+HTTP transport contract (\req{REQ-H-*}), the behaviour of the program
+when it is refused (\req{REQ-E-*}), the correctness of the
+cryptographic primitive behind the \code{rate-key} header
+(\req{REQ-S-*}), and the self-diagnosis mode (\req{REQ-G-*}).  The
+absence of the first of these is why the defect described in CAST-DR-001
+was not caught by testing.
+
+\subsection{Rationale for revision 4.0}
+
+The program now signs itself in.  Revision 3.0 expected an operator to
+extract a session from a browser by hand and export it, which meant the
+live-data cases were skipped on every ordinary run --- twenty-one of
+them.  Revision 4.0 of the software reads a user name and password from
+a credentials file, completes the OpenID~Connect flow, and activates
+the session; the live-data cases are therefore the \emph{normal} path,
+and it is the refusal cases that skip.
+
+The tier vocabulary changes accordingly (Section~\ref{sec:tiers}): the
+question is no longer ``is this caller anonymous'' but ``did the
+sign-in work, and if not, why''.  A new sub-process and a new
+requirement family, \req{REQ-L-*}, cover the sign-in itself ---
+including two properties that are security-relevant rather than merely
+functional: that the credentials file is parsed and never sourced, and
+that names outside the \code{USAS\_} prefix in it are ignored.
+
+Revision 4.0 also records two defects the revised suite found on its
+first authorised run, both introduced by revision 3.0 of the software:
+\code{BestTimes} answers \code{404} for a stroke-and-distance pair the
+swimmer has never swum, and the abort-on-failure logic added in
+revision 3.0 treated that as fatal, ending the default all-events run
+at the first such event (now \req{REQ-F-34}); and one CWEB chunk had
+grown to twenty-six lines (\req{REQ-D-03}).
+
+\subsection{Rationale for revision 5.0}
+
+The program now uses one database --- \code{swimming} on
+\code{100.77.243.69} --- named in a compiled-in constant, and adapts to
+its normalised schema instead of writing a flat table of its own.  Two
+things follow for testing.
+
+First, there is no connection string to point at a scratch database, so
+the suite tests against the real one.  It does this the only responsible
+way: every write it makes is a clearly-marked fixture swimmer
+(\code{ZZ swim-times \dots{} fixture}) removed again by an \code{EXIT}
+trap, and the assertions about existing data are read-only counts.  The
+suite adds and removes rows; it does not alter anyone else's.
+
+Second, the database is shared with a sibling loader, so a passing run
+is no longer evidence that this program wrote anything.  The cases are
+framed accordingly: \req{REQ-F-73} asserts that a \emph{second} store
+run adds nothing, which is the property that makes \code{-o store} safe
+to schedule, and \req{REQ-F-76} asserts that the read joins through to
+names, which is the property that would break first if the schema
+moved.
+
+\code{test-db.sh} is rewritten around the same principle: it verifies
+the shape the program depends on --- the tables, the ten columns the
+insert names, the absent default on \code{swim\_time\_id} that forces a
+synthesised key, the natural-key constraint, all 31 event codes as
+foreign-key targets, and that the \code{time\_standard} table rejects
+the elite labels \code{db\_standard} maps to \code{NULL}.
+
+\subsection{Rationale for revision 6.0}
+
+Two defects were found by analysing the roster-to-database path, and
+this revision adds the cases that pin them.  Both were found by
+inspection rather than by a failing test, which is itself the finding:
+the suite had no case that walked a roster containing an entry the
+service could not resolve, and none that wrote a swimmer whose recorded
+name differed in spelling from the one the service returns.
+
+\req{REQ-F-77} and \req{REQ-F-77a} cover the first: a \code{404} from
+the member search means ``no member matches this name'', and treating
+it as a service failure aborted the whole roster walk at the first
+stale entry, silently dropping every swimmer after it.
+
+\req{REQ-F-78} through \req{REQ-F-80}, with \req{DB-19} and
+\req{DB-20}, cover the second: the two writers of the shared database
+learned their names from different feeds --- one recorded middle
+initials, the other returns middle names --- so an exact-name match
+found neither the row nor the conflict, and would have inserted a
+duplicate person.  \req{DB-20} is the more important of the pair: it
+asserts what the match must \emph{not} do.  Loosening a match is only
+safe while it cannot cross into a row that has already been identified.
 
 \subsection{Scope}
 
-This STP covers verification of the swim-times executable that
-is tangled out of \code{swim2/swim-times.w}.  It does not cover
-verification of upstream USA~Swimming data, the data-hub REST
-back-end,
-or the unrelated Pandoc-based PDF report at \code{swim/swim-times.md}.
+\paragraph{In scope.}  All requirements tagged \req{REQ-F-*},
+\req{REQ-H-*}, \req{REQ-E-*}, \req{REQ-S-*}, \req{REQ-G-*},
+\req{REQ-I-*}, \req{REQ-P-*}, \req{REQ-D-*}, and \req{REQ-A-*} in
+CAST-SRS-001, plus the database-integrity cases \req{DB-01}
+through \req{DB-10}.
+
+\paragraph{Out of scope.}
+\begin{itemize}
+  \item The accuracy of the data USA~Swimming returns.  It is treated
+        as authoritative.
+  \item USA~Swimming's authorisation policy.  The suite observes and
+        classifies it; it does not assert what it ought to be.
+  \item The cwebmac macros and their typesetting choices, except that
+        the woven document must typeset without \TeX{} errors
+        (\req{REQ-A-04}).
+\end{itemize}
 
 \subsection{References}
 
-\begin{enumerate}[label={[\arabic*]}]
-  \item ISO/IEC/IEEE 29119-3:2021, \textit{Software and systems
-        engineering---Software testing---Part 3: Test documentation}.
-  \item ISO/IEC/IEEE 29148-2018, \textit{Systems and software engineering---
-        Life cycle processes---Requirements engineering}.
-  \item D.\,L.\,Parnas and P.\,C.\,Clements, ``A Rational Design Process:
-        How and Why to Fake It,'' \textit{IEEE Trans.\ Software Eng.},
-        vol.\,SE-12, no.\,2, pp.\,251--257, Feb.\ 1986.
-  \item CAST-CONOPS-001 Rev.\,1.0, \textit{Concept of Operations:
-        swim-times}, April 21, 2026.
-  \item CAST-SRS-001 Rev.\,1.0, \textit{Software Requirements
-        Specification: swim-times}, April 22, 2026.
-  \item CAST-SDD-001 Rev.\,1.0, \textit{Software Design Document:
-        swim-times}, April 22, 2026.
-  \item \code{swim2/test-swim-times.sh} --- automated test script
-        that implements the test cases enumerated in this plan.
+\begin{enumerate}[leftmargin=*,label={[\arabic*]}]
+\item CAST-SRS-001, \textit{Software Requirements Specification},
+      \code{swim-times-srs.tex}.
+\item CAST-SDD-001, \textit{Software Design Document},
+      \code{swim-times-sdd.tex}.
+\item CAST-CONOPS-001, \textit{Concept of Operations},
+      \code{swim-times-conops.tex}.
+\item CAST-DR-001, \textit{Defect Investigation and Corrective Action
+      Report}, \code{swim-times-defect-report.tex}.
+\item ISO/IEC/IEEE 29119-3:2021, \textit{Software and systems
+      engineering --- Software testing --- Part 3: Test documentation}.
+\item FIPS PUB 180-4, \textit{Secure Hash Standard}, NIST, 2015.
+\item RFC 2104, \textit{HMAC: Keyed-Hashing for Message
+      Authentication}, 1997; RFC 4231, \textit{Test Vectors for
+      HMAC-SHA-256}, 2005.
+\item D.\,L.\,Parnas and P.\,C.\,Clements, ``A Rational Design Process:
+      How and Why to Fake It,'' \textit{IEEE Trans.\ Software
+      Engineering}, SE-12(2), 1986.
 \end{enumerate}
 
 % =================================================================
 \section{Test Context}
 % =================================================================
 
-\subsection{Project background}
-
-swim-times is a single-binary command-line utility that retrieves
-swim times from the USA~Swimming data hub via its public REST API.
-The full operational context is described in CAST-CONOPS-001.
-
 \subsection{Test items}
 
 \begin{itemize}
-  \item The CWEB literate source \code{swim2/swim-times.w} (the
-        canonical source of record).
-  \item The tangled C source \code{swim2/swim-times.c} (a build
-        artefact).
-  \item The compiled executable \code{swim2/swim-times}.
-  \item The cwebmac-typeset documentation PDF
-        \code{swim2/swim-times.pdf}.
-\end{itemize}
-
-\subsection{Test scope}
-
-\paragraph{In scope.}
-All requirements tagged \req{REQ-F-*}, \req{REQ-I-*}, \req{REQ-P-*},
-\req{REQ-D-*}, and \req{REQ-A-*} in CAST-SRS-001.
-
-\paragraph{Out of scope.}
-\begin{itemize}
-  \item The accuracy of data returned by USA~Swimming (treated as
-        an authoritative external system).
-  \item The cwebmac LaTeX macros and their typesetting choices.
-  \item Performance under network outage or DNS failure (these
-        are operator-environment conditions).
+  \item \code{swim2/swim-times.w} --- the CWEB literate source, the
+        canonical source of record.
+  \item \code{swim2/swim-times.c} --- the tangled C source, a build
+        artefact regenerated by the suite.
+  \item \code{swim2/swim-times} --- the compiled executable.
+  \item \code{swim2/swim-times.pdf} --- the woven documentation.
+  \item \code{swim2/schema.sql} --- the Postgres mirror schema.
 \end{itemize}
 
 \subsection{Assumptions and constraints}
 
+Revision 2.0 listed anonymous data-hub access as an assumption.  It is
+now a \emph{variable}, observed at run time.  The remaining assumptions
+are:
+
 \begin{itemize}
-  \item The test host has outbound HTTPS access to
-        \texttt{times-api.usaswimming.org}.
-  \item The anonymous data-hub REST services remain reachable
-        (member search and \code{BestTimes}) on the day the test is
-        executed; no credential is required.
-  \item The four tracked swimmers continue to exist in the
-        USA~Swimming member directory.
-  \item POSIX utilities (\code{awk}, \code{grep}, \code{diff},
-        \code{curl}, \code{otool} or \code{ldd}) are available.
+  \item POSIX utilities (\code{awk}, \code{grep}, \code{sed},
+        \code{cmp}, \code{curl}, and \code{otool} or \code{ldd}) are
+        available.
+  \item A C compiler and \code{ctangle}/\code{cweave} are available,
+        natively or through the container wrapper \code{../cweb.sh}.
+  \item \code{pdftex} is available for \req{REQ-A-04}.
+  \item Where the database cases are to run: a reachable Postgres
+        server holding a \code{swim-times} database.  Where it is not
+        reachable, those cases \code{SKIP}.
+  \item Where the live-data cases are to run: valid
+        \code{USAS\_SUB\_ID} and \code{USAS\_SESSION\_ID} values.
+        Where they are absent, those cases \code{SKIP} and the refusal
+        cases run instead.
 \end{itemize}
 
 \subsection{Stakeholders}
@@ -165,26 +290,618 @@ All requirements tagged \req{REQ-F-*}, \req{REQ-I-*}, \req{REQ-P-*},
 \begin{center}
 \begin{tabular}{ll}
   \toprule
-  \textbf{Role}            & \textbf{Concern}                              \\
+  \textbf{Role}          & \textbf{Concern}                                \\
   \midrule
-  Maintainer (developer)   & Timely detection of regressions               \\
-  Coach (operator)         & Behavioural correctness of CLI                \\
-  Auditor                  & Traceability from SRS to evidence             \\
+  Maintainer (developer) & Timely, correctly attributed regression signal  \\
+  Coach (operator)       & Behavioural correctness of the CLI              \\
+  Auditor                & Traceability from SRS to evidence               \\
   \bottomrule
 \end{tabular}
 \end{center}
 
 % =================================================================
-\section{Communication}
+\section{Test Strategy}
 % =================================================================
 
-Test results are written to standard output by
-\code{test-swim-times.sh} as PASS/FAIL/SKIP lines, followed by a
-summary count.  A non-zero exit status from the script indicates
-test failure and shall be treated as a release blocker by the
-maintainer.  No external defect-tracking system is required at
-present; failures are recorded as GitHub issues against the
-project repository.
+\subsection{The access-tier principle}\label{sec:tiers}
+
+Before any behavioural case runs, the suite executes
+\code{swim-times -o diag} and classifies the result into one of three
+tiers.  The classification decides which cases are meaningful.
+
+\begin{center}
+\begin{tabular}{llp{5.6cm}}
+  \toprule
+  \textbf{Tier} & \textbf{Observed} & \textbf{Consequence} \\
+  \midrule
+  \textsc{authorized} & sign-in ok, queries 200
+    & The normal outcome.  Live-data cases run; refusal cases
+      \code{SKIP}. \\
+  \textsc{nocreds} & no credentials found
+    & Live-data cases \code{SKIP} naming the file to populate; refusal
+      cases run. \\
+  \textsc{authfail} & credentials present, sign-in failed
+    & As above, with the reason ``check \code{USAS\_USER} and
+      \code{USAS\_PASS}''. \\
+  \textsc{locked} & sign-in ok, queries 401/403
+    & The service refused an authenticated caller --- a change in its
+      policy, or an activation failure.  Refusal cases run. \\
+  \textsc{unreachable} & nothing answers
+    & Both sets \code{SKIP}.  Static, CLI, crypto, sign-in-failure, and
+      database cases still run. \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Two properties follow, and they are the point of the design.
+First, the suite gives a truthful verdict on any host, with or without
+network, database, or account.  Second, a \code{FAIL} is unambiguous:
+it is a defect in \code{swim-times}, never a statement about the
+world.  \req{REQ-G-03} verifies that the classification itself works.
+
+\subsection{Test sub-processes}
+
+Nine sub-processes execute in order.  An earlier failure does not
+suppress a later sub-process except where the artefact is missing
+outright.
+
+\begin{description}[style=nextline,leftmargin=1em]
+  \item[1.\ Build.]  \code{make -B tangle compile} regenerates
+        \code{swim-times.c} from the \code{.w} file and compiles it.  A
+        failure here aborts the run: there is nothing to test.
+  \item[2.\ Static and design constraints.]  Properties of the source
+        and the binary --- warning-free compilation, module size,
+        dependency set, absence of embedded credentials, HTTPS-only
+        URLs, and a \TeX-error-free woven document.
+  \item[3.\ HTTP transport contract.]  Source-level assertions that
+        the transport layer reports status codes, distinguishes an
+        empty body from a failure, sets timeouts, and sends no
+        \code{Accept} header.  These are the regression guards for
+        CAST-DR-001 root causes 2 and 3.
+  \item[4.\ Cryptographic self-test.]  \code{-o selftest} against the
+        FIPS 180-4 and RFC 4231 vectors, plus an independent
+        cross-check of the expected digests.
+  \item[5.\ Command-line interface.]  Exit codes, usage completeness,
+        and mutually-exclusive option rejection.  Requires no network.
+  \item[6.\ Access-tier determination.]  Section~\ref{sec:tiers}.
+  \item[7.\ Sign-in.]  The credentials file, the sign-in failure paths,
+        the activation step, and the absence of an anonymous fallback.
+        Four of its seven cases construct their own fixture credentials
+        and run in any tier.
+  \item[7b.\ Refusal handling.]  Runs when the service declines the
+        caller: the program's behaviour in that event.
+  \item[8.\ Live data retrieval.]  Runs in tier \textsc{authorized},
+        which is now the expected outcome of an ordinary run.
+  \item[9.\ Database persistence.]  Schema conformance, the duplicate
+        guard, and the offline read path, against seeded fixtures.
+\end{description}
+
+\subsection{Test design techniques}
+
+\begin{description}[style=nextline,leftmargin=1em]
+  \item[Specification-based (black box).]  CLI behaviour, exit codes,
+        output format, and retrieved content are exercised through the
+        published interface only.
+  \item[Structure-based (white box), by inspection.]  The
+        \req{REQ-H-*} and \req{REQ-D-*} cases assert properties of the
+        literate source that cannot be observed from outside --- that
+        the status is read, that an empty body is normalised, that no
+        chunk exceeds twenty-four lines.  These are regression guards:
+        their purpose is to fail loudly if a future edit reintroduces a
+        defect whose external symptom is subtle.
+  \item[Known-answer testing.]  SHA-256 and HMAC-SHA256 are verified
+        against published vectors rather than against themselves.
+  \item[Fixture-based testing.]  Database cases seed deterministic rows
+        and remove them afterwards, so they neither depend on what the
+        live service happens to return nor leave residue behind.
+  \item[Error guessing.]  The refusal cases were derived from the
+        specific failure modes observed in CAST-DR-001, including the
+        one that produced 638 doomed requests per run.
+  \item[Negative testing with a constructed fixture.]  \req{REQ-L-03}
+        and \req{REQ-L-04} write a credentials file containing a
+        command substitution and a non-\code{USAS\_} assignment, then
+        assert that the substitution did not run and the assignment was
+        not adopted.  Both properties are invisible from the program's
+        normal output and can only be established this way.
+\end{description}
+
+\subsection{Test environment}
+
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  \textbf{Element}        & \textbf{Requirement}                        \\
+  \midrule
+  Operating system        & POSIX (macOS or Linux)                      \\
+  Compiler                & C99, \code{-O2 -Wall}                       \\
+  Libraries               & libcurl, libpq                              \\
+  CWEB tools              & \code{ctangle}, \code{cweave} (native or container) \\
+  Typesetting             & \code{pdftex}, \code{pdflatex}              \\
+  Database (optional)     & \code{swimming} on \code{100.77.243.69},
+                            reachable via libpq                        \\
+  Network (optional)      & Outbound HTTPS to \code{times-api.usaswimming.org} \\
+  Credentials (optional)  & \code{USAS\_USER} and \code{USAS\_PASS} in
+                            \code{\$HOME/.usas-env}, or a session in
+                            \code{USAS\_SUB\_ID}/\code{USAS\_SESSION\_ID} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The three optional elements are what the tiering exists to
+handle; none is a precondition for a useful run.
+
+\subsection{Test data}
+
+\begin{itemize}
+  \item \textbf{Roster data} is the \code{SWIMMERS} table compiled into
+        the program.
+  \item \textbf{The probe member} is Katie Ledecky's public
+        \code{memberId} \code{6CD35348E5824C}, used by \code{-o diag}
+        and \req{REQ-F-18}.  It is a matter of public record and is
+        read-only.
+  \item \textbf{Database fixtures} are a swimmer named
+        \code{ZZ swim-times \dots{} fixture (delete me)} and the swims
+        attached to it.  The name cannot collide with a real swimmer,
+        and \code{swim} cascades on delete, so removing the swimmer
+        removes everything the fixture created.  Both suites install an
+        \code{EXIT} trap so the fixture is removed even if a case fails
+        or the run is interrupted.
+  \item \textbf{Credentials fixtures} are a temporary
+        \code{USAS\_ENV\_FILE} written into the suite's scratch
+        directory, carrying deliberately invalid credentials, a command
+        substitution used as a tripwire, and a bogus
+        \code{SWIM\_TIMES\_PGCONNINFO}.  No real credential is ever
+        written by the suite.
+  \item \textbf{Cryptographic vectors} are the published values for
+        SHA-256 of the empty string, of \code{"abc"}, and of 199
+        \code{'a'} bytes, and HMAC-SHA256 under the empty key and under
+        \code{"key"}.
+\end{itemize}
+
+\subsection{Item pass/fail criteria}
+
+\begin{itemize}
+  \item A case \textbf{passes} when its assertion holds.
+  \item A case \textbf{fails} when its assertion does not hold.  Every
+        failure is a defect in \code{swim-times} or in its
+        documentation.
+  \item A case is \textbf{skipped} when a stated precondition is not
+        met on the test host.  The reason is printed with the skip.  A
+        skip is not a failure and does not affect exit status.
+  \item The suite \textbf{passes} when no case fails.  Its exit status
+        is 0 in that event and 1 otherwise.
+\end{itemize}
+
+\noindent A release is blocked by any failure.  A release is
+\emph{not} blocked by skips, but a release made while the live-data
+cases are skipped carries the caveat that live retrieval was not
+demonstrated on this run --- which the tester shall record.
+
+\subsection{Suspension and resumption}
+
+Testing is suspended if the build sub-process fails, since every later
+case depends on the executable.  It resumes when a build is obtained.
+No other condition suspends the run: the tiering absorbs a missing
+network, a missing database, and missing credentials.
+
+\subsection{Test deliverables}
+
+\begin{itemize}
+  \item This plan (CAST-STP-001).
+  \item \code{test-swim-times.sh} --- the requirements suite.
+  \item \code{test-db.sh} --- the database-integrity suite.
+  \item The console transcript of each run, which is the test log.
+  \item CAST-DR-001, where a run's findings warrant an investigation.
+\end{itemize}
+
+% =================================================================
+\section{Test Cases and Traceability}\label{sec:cases}
+% =================================================================
+
+\subsection{Static and design constraints}
+
+\begin{center}
+\begin{longtable}{p{2.1cm}p{5.2cm}p{6.2cm}}
+  \toprule
+  \textbf{ID} & \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  \req{BUILD}     & Tangle and compile succeed
+    & \code{make -B tangle compile}; executable exists. \\
+  \req{REQ-D-01}  & Warning-free build
+    & No \code{warning:} in the build log under \code{-O2 -Wall}. \\
+  \req{REQ-D-02}  & \code{.c} is a regenerable artefact
+    & \code{swim-times.c} is newer than \code{swim-times.w} after the
+      build. \\
+  \req{REQ-D-03}  & No CWEB chunk exceeds 24 lines
+    & \code{awk} audit over the \code{.w} file. \\
+  \req{REQ-D-04}  & Dependency set is \{libc, libcurl, libpq, TLS\}
+    & \code{otool -L} / \code{ldd} against an allowlist.  In
+      particular no crypto library may appear: SHA-256 is in-tree. \\
+  \req{REQ-D-11}  & No embedded credential
+    & Pattern scan for bearer tokens and JWTs in the source. \\
+  \req{REQ-I-20}  & HTTPS-only service URLs
+    & \code{https://} base URLs present, no \code{http://} hub URL. \\
+  \req{REQ-A-04}  & Documentation typesets cleanly
+    & \code{cweave} then \code{pdftex}; PDF exists and the log
+      contains zero \code{!} errors. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{HTTP transport contract (regression guards, CAST-DR-001)}
+
+\begin{center}
+\begin{longtable}{p{2.1cm}p{5.2cm}p{6.2cm}}
+  \toprule
+  \textbf{ID} & \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  \req{REQ-H-01} & \code{http\_request} exposes the HTTP status
+    & Signature carries a \code{long *status} out-parameter. \\
+  \req{REQ-H-02} & The status comes from libcurl
+    & \code{CURLINFO\_RESPONSE\_CODE} appears in the source. \\
+  \req{REQ-H-03} & An empty body is not a failure
+    & The normalisation \code{calloc(1,\,1)} is present, so
+      \code{NULL} means ``no response'' and nothing else. \\
+  \req{REQ-H-04} & Timeouts are configured
+    & \code{CURLOPT\_TIMEOUT} and \code{CURLOPT\_CONNECTTIMEOUT}
+      present. \\
+  \req{REQ-H-05} & No \code{Accept} header is sent
+    & \code{"Accept: application/json"} absent from the source.
+      Sending it makes the service double-encode its payload. \\
+  \req{REQ-H-06} & Every response site checks the status
+    & Count of \code{status != 200} guards $\geq$ the number of
+      response-consuming call sites. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{Cryptographic self-test}
+
+\begin{center}
+\begin{longtable}{p{2.1cm}p{5.2cm}p{6.2cm}}
+  \toprule
+  \textbf{ID} & \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  \req{REQ-S-01} & Known-answer vectors pass
+    & \code{-o selftest} exits 0 and reports ``all vectors passed''. \\
+  \req{REQ-S-02} & At least five vectors are exercised
+    & Count of \code{ok} verdicts in the self-test output. \\
+  \req{REQ-S-03} & Expected digests are independently derived
+    & The HMAC vector in the source matches Python \code{hashlib}.
+      Skipped where \code{python3} is unavailable. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{Command-line interface}
+
+\begin{center}
+\begin{longtable}{p{2.1cm}p{5.2cm}p{6.2cm}}
+  \toprule
+  \textbf{ID} & \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  \req{REQ-F-03} & Empty invocation prints usage, exits 2
+    & Run with no arguments; check status and output. \\
+  \req{REQ-F-04} & Unknown flag prints usage, exits 2
+    & Run with \code{-Z}. \\
+  \req{REQ-F-05} & Usage documents every keyword
+    & \code{fastest}, \code{csv}, \code{store}, \code{offline},
+      \code{diag}, \code{selftest}, \code{-m}, and both credential
+      variables appear in the usage text. \\
+  \req{REQ-F-06} & Usage lists the whole roster
+    & Declared count $\geq 29$, generated from \code{SWIMMERS}. \\
+  \req{REQ-F-07} & \code{diag} and \code{offline} are exclusive
+    & Combination exits 2 with an explanatory message. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{Sign-in}
+
+\begin{center}
+\begin{longtable}{p{2.1cm}p{5.2cm}p{6.2cm}}
+  \toprule
+  \textbf{ID} & \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  \req{REQ-L-01} & Absent credentials are named precisely
+    & Run with \code{USAS\_ENV\_FILE} pointing at a non-existent path
+      and the credential variables unset; expect exit 77 and a message
+      naming both the file and the variables. \\
+  \req{REQ-L-02} & Rejected credentials are reported in plain language
+    & Run with a deliberately wrong password; expect exit 77 and
+      ``rejected the credentials'', \emph{not} the \code{HTTP 200} the
+      identity provider actually answers with. \\
+  \req{REQ-L-03a} & Credentials are read from the file
+    & A fixture file supplies a distinctive user name; the failure
+      message must quote it. \\
+  \req{REQ-L-03} & The file is parsed, not sourced
+    & The same fixture contains
+      \code{USAS\_SIDE\_EFFECT="\$(touch \dots)"}; the marker file must
+      not exist afterwards. \\
+  \req{REQ-L-04} & Non-\code{USAS\_} assignments are ignored
+    & The same fixture sets a bogus
+      \code{SWIM\_TIMES\_PGCONNINFO}; an offline read with the real
+      variable unset must still succeed, proving the built-in default
+      was used. \\
+  \req{REQ-L-05} & \code{offline} needs no credentials
+    & Offline read with every credential variable unset and no file. \\
+  \req{REQ-L-06} & The session is activated
+    & \code{GetDataHubSecurityInfoForIdp} and \code{activate\_session}
+      appear in the source.  Its behavioural counterpart is
+      \req{REQ-G-03} reaching tier \textsc{authorized}: without the
+      activation the probes return \code{401}. \\
+  \req{REQ-L-07} & No anonymous data path
+    & Every non-\code{offline} run is gated on \code{ensure\_session}. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{Access-tier determination}
+
+\begin{center}
+\begin{longtable}{p{2.1cm}p{5.2cm}p{6.2cm}}
+  \toprule
+  \textbf{ID} & \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  \req{REQ-G-01} & \code{diag} probes every access class
+    & At least five probe lines; exit status 0. \\
+  \req{REQ-G-02} & \code{diag} reports the identity presented
+    & \code{Usas-Sub-Id} and \code{Device-Id} appear in the output. \\
+  \req{REQ-G-03} & The five tiers are distinguishable
+    & The suite classifies the run from \code{diag} output alone and
+      reports which tier it selected. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{Refusal handling}
+
+\begin{center}
+\begin{longtable}{p{2.1cm}p{5.2cm}p{6.2cm}}
+  \toprule
+  \textbf{ID} & \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  \req{REQ-E-01} & A refusal exits \code{RC\_NOPERM} (77)
+    & Single-swimmer run in a non-authorized tier; check status. \\
+  \req{REQ-E-02} & The diagnostic is specific
+    & \code{stderr} names \code{HTTP 403 Forbidden} and the endpoint,
+      and does not contain the superseded text
+      ``person lookup request failed''. \\
+  \req{REQ-E-03} & The remedy is stated once per run
+    & \code{USAS\_SESSION\_ID} appears exactly once in \code{stderr}. \\
+  \req{REQ-E-04} & A refusal aborts promptly
+    & Full-roster run emits at most two \code{Error:} lines rather
+      than replaying the refusal across 29 swimmers. \\
+  \req{REQ-F-18} & The known-\code{memberId} short cut works
+    & \code{-m 6CD35348E5824C} resolves the member through
+      \code{GetMember} without a search.  Runs in every tier with a
+      network, since \code{GetMember} is open to anonymous callers. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{Live data retrieval (tier \textsc{authorized})}
+
+\begin{center}
+\begin{longtable}{p{2.1cm}p{5.2cm}p{6.2cm}}
+  \toprule
+  \textbf{ID} & \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  \req{REQ-F-10} & Swimmer selection restricts output
+    & Only the selected swimmer appears. \\
+  \req{REQ-F-11} & Multiple ids select multiple swimmers
+    & Count of \code{Swimmer:} lines $\geq 2$. \\
+  \req{REQ-F-12} & \code{stella} resolves correctly
+    & Resolved name contains \code{Evans}. \\
+  \req{REQ-F-13} & \code{ledecky10} resolves correctly
+    & Resolved name contains \code{Ledecky}. \\
+  \req{REQ-F-14/15/16} & Age windows are declared
+    & The three Ledecky windows appear on their \code{Swimmer}
+      entries.  Checked statically, so these run in every tier. \\
+  \req{REQ-F-16a} & An age-windowed row carries a date
+    & Row matches the ISO date pattern. \\
+  \req{REQ-F-20} & A single \code{-e} restricts to one event
+    & Exactly one event section. \\
+  \req{REQ-F-21} & All 31 events by default
+    & Thirty-one event sections when \code{-e} is omitted. \\
+  \req{REQ-F-22} & The event list is honoured
+    & Section count equals the request. \\
+  \req{REQ-F-30} & \code{memberId} resolution succeeds
+    & A \code{Swimmer:} line and an event section are produced. \\
+  \req{REQ-F-31} & The times query returns results
+    & At least one event section with data. \\
+  \req{REQ-F-32} & Rows carry time, date, and meet
+    & A row matches the full-row pattern. \\
+  \req{REQ-F-33} & Per-pair caching is present
+    & The skip-if-already-fetched chunk exists. \\
+  \req{REQ-F-34} & A \code{404} means ``no such time'', not failure
+    & The all-events run for a young swimmer must report all
+      thirty-one sections, most of them \code{(no times found)}.  This
+      is \req{REQ-F-21}: before the fix it saw zero. \\
+  \req{REQ-F-40} & Rows are fastest-first
+    & The emitted order equals the sorted order. \\
+  \req{REQ-F-41} & \code{fastest} prints one row
+    & At most one data row. \\
+  \req{REQ-F-42} & Dates are ISO \code{YYYY-MM-DD}
+    & Pattern match on every date field. \\
+  \req{REQ-F-50} & Table mode prints heading and header
+    & Column header present. \\
+  \req{REQ-F-51} & CSV header is the six-column contract
+    & Exact string comparison. \\
+  \req{REQ-F-52} & Every CSV row carries the swimmer name
+    & No data row lacks a leading quoted name field. \\
+  \req{REQ-P-01} & Full refresh under five minutes
+    & Extrapolated from the measured single-query time. \\
+  \req{REQ-P-02} & Single query under ten seconds
+    & Wall-clock measurement. \\
+  \req{REQ-A-01} & Repeated runs are identical
+    & \code{cmp} of two consecutive runs. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{The shared database}
+
+Run by \code{test-swim-times.sh} (\req{REQ-F-7x}) and in greater depth
+by \code{test-db.sh} (\req{DB-*}).  Both use the compiled-in connection
+string, because the program admits no other.
+
+\begin{center}
+\begin{longtable}{p{2.1cm}p{5.2cm}p{6.2cm}}
+  \toprule
+  \textbf{ID} & \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  \req{REQ-F-70} & \code{swim} carries every column the insert names
+    & Catalogue query for the ten columns of
+      \code{db\_insert\_row}. \\
+  \req{REQ-F-71} & The offline read joins through to names
+    & \code{-o offline,csv} returns rows whose swimmer and meet fields
+      are populated, proving the \code{swim}$\to$\code{swimmer} join
+      and the \code{meet} outer join. \\
+  \req{REQ-F-72} & Offline mode performs no network I/O
+    & curl initialisation is guarded by the offline flag. \\
+  \req{REQ-F-73} & Writes are idempotent
+    & Two consecutive \code{-o store} runs; the second must add no
+      rows.  This is what makes \code{-o store} safe to schedule
+      against a database somebody else also writes. \\
+  \req{REQ-F-75} & A run that cannot sign in writes nothing
+    & Store run with the credentials removed; row count unchanged and
+      exit 77. \\
+  \req{REQ-F-77} & An absent swimmer is skipped, not fatal
+    & \code{-m} with an unknown member id: expect a warning, the
+      end-of-run tally, and exit 69. \\
+  \req{REQ-F-77a} & The walk continues past one
+    & Structural: the dispatcher must \code{continue} rather than
+      \code{break}.  A roster entry that fails to resolve cannot be
+      injected from outside the binary, so this is inspected. \\
+  \req{REQ-F-78} & The loose match is confined to unlinked rows
+    & Structural: both fuzzy tiers carry \code{member\_id IS NULL}. \\
+  \req{REQ-F-76} & The surrogate swim id is stable
+    & \code{swim\_surrogate\_id} hashes the natural key, and the insert
+      uses \code{ON CONFLICT DO NOTHING}.  An unstable id would insert
+      the same swim again under a fresh primary key on every run. \\
+  \midrule
+  \req{DB-01} & The database is reachable
+    & \code{SELECT 1} against
+      \code{swimming@100.77.243.69}. \\
+  \req{DB-02} & The program names that same database
+    & The connection string in \code{swim-times.w} matches the one
+      under test.  A mismatch would make every case below a report
+      about the wrong server. \\
+  \req{DB-03} & It cannot be redirected
+    & No \code{getenv} for \code{SWIM\_TIMES\_PGCONNINFO} remains.  The
+      name may still appear in the prose explaining its withdrawal. \\
+  \req{DB-04} & The five tables the program names exist
+    & \code{swimmer}, \code{meet}, \code{swim}, \code{event},
+      \code{time\_standard}. \\
+  \req{DB-05/06/07} & Their columns exist
+    & Per-table catalogue queries for the columns the insert and the
+      swimmer/meet resolution name. \\
+  \req{DB-08} & \code{swim\_time\_id} has no default
+    & Which is \emph{why} the program synthesises one.  Were a default
+      to appear, \code{swim\_surrogate\_id} would become unnecessary
+      and the code should be revisited --- so this is a notification,
+      not merely a guard. \\
+  \req{DB-09} & The natural-key constraint is present
+    & Matched by column set: \code{(swimmer\_key, event\_code,
+      swim\_time, swim\_date, meet\_key)}. \\
+  \req{DB-10} & All 31 event codes are valid FK targets
+    & Every code the program can request exists in \code{event}; one
+      absent would make that event's rows unwritable. \\
+  \req{DB-11} & \code{time\_standard} holds the seven mapped levels
+      and no elite labels
+    & Confirms both halves of \code{db\_standard}'s contract. \\
+  \req{DB-12} & Repeated identical inserts collapse
+    & Three inserts of one fixture swim yield one row. \\
+  \req{DB-13} & A distinct swim is not merged
+    & A second, different fixture swim yields a second row. \\
+  \req{DB-14} & An elite label is rejected by the FK
+    & Inserting \code{'Summer Jrs'} must fail where the same row with
+      a \code{NULL} standard succeeds --- attributing the failure to the
+      label rather than to the rest of the row. \\
+  \req{DB-19} & The loose match claims an unlinked row
+    & A fixture swimmer with a middle initial and no member id is
+      matched by a first/last query spelling the middle name in full ---
+      the case that produced duplicates. \\
+  \req{DB-20} & \dots{} and never a linked one
+    & The same query against the same fixture, once it carries a
+      \emph{different} member id, must match nothing.  This is the
+      guard that makes the fuzziness safe. \\
+  \req{DB-15/16/17} & The read path works end to end
+    & \code{-o offline,csv} exits 0 with empty \code{stderr}, emits the
+      six-column header, and returns rows with no empty swimmer
+      name. \\
+  \req{DB-18} & Contents are reportable
+    & Swimmer, meet, and swim counts, broken down by
+      \code{source\_endpoint} and \code{auth\_mode} so the two loaders'
+      contributions are distinguishable. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
+% =================================================================
+\section{Execution and Reporting}
+% =================================================================
+
+\subsection{Invocation}
+
+\begin{lstlisting}
+cd swim2
+make test                      # or: ./test-swim-times.sh
+make db-test                   # or: ./test-db.sh
+
+./test-swim-times.sh --no-network   # static, CLI, crypto, DB only
+./test-swim-times.sh --no-db        # skip the database sub-process
+\end{lstlisting}
+
+\noindent No credential handling is needed at the command line: the
+program signs itself in from \code{\$HOME/.usas-env}, so an ordinary
+run reaches tier \textsc{authorized} on its own.  To test a different
+account, point \code{USAS\_ENV\_FILE} at another file; to test the
+unauthenticated paths deliberately, unset the credential variables and
+point it at a non-existent path.
+
+\subsection{Result format}
+
+Each case emits one line:
+
+\begin{lstlisting}
+PASS REQ-H-03     empty response body normalised to "" rather than NULL
+FAIL REQ-E-01     refused run exits 77 (RC_NOPERM), got 1
+SKIP REQ-F-31     data hub requires sign-in; set USAS_SUB_ID and USAS_SESSION_ID
+\end{lstlisting}
+
+\noindent followed by a summary count.  Exit status is 0 when no case
+failed.  The transcript is the test log; no external tool is required
+to interpret it.
+
+\subsection{Reference result}
+
+The baseline recorded on release of this revision, on a host with
+network, database, and a working USA~Swimming account (tier
+\textsc{authorized}):
+
+\begin{center}
+\begin{tabular}{lrrr}
+  \toprule
+  \textbf{Suite} & \textbf{Pass} & \textbf{Fail} & \textbf{Skip} \\
+  \midrule
+  \code{test-swim-times.sh} & 67 & 0 & 4 \\
+  \code{test-db.sh}         & 20 & 0 & 0 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The four skips are the refusal cases \req{REQ-E-01} through
+\req{REQ-E-04}, which cannot run while the service is answering.  On
+the same host with \code{--no-network} the suite records 31 passes and
+32 skips, and still no failures.
+
+For comparison, revision 3.0 of this plan recorded 38 passes and 21
+skips on the same host --- the difference is the twenty-one live-data
+cases that signing in makes reachable, plus the \req{REQ-L-*} and
+\req{REQ-F-76} cases added since.  \code{test-db.sh} grew from 10 cases
+to 18 when it was rewritten around the shared schema.
 
 % =================================================================
 \section{Risk Register}
@@ -194,288 +911,88 @@ project repository.
 \begin{longtable}{p{4.0cm}p{1.5cm}p{1.5cm}p{6cm}}
   \toprule
   \textbf{Risk} & \textbf{Likeli-} & \textbf{Impact} & \textbf{Mitigation} \\
-                & \textbf{hood}     &                  & \\
+                & \textbf{hood}    &                 & \\
   \midrule\endhead
-  Device-Id format rejected by server
-            & Low  & High & \code{device\_id()} updated to match the
-                            current data-hub format; recompile and
-                            re-run STP. \\
-  REST response schema change
-            & Low  & High & Test script's \req{REQ-F-32} probe
-                            detects parse failure on first run. \\
-  Network outage during test
-            & Med  & Low  & Online tests \texttt{SKIP} cleanly;
-                            offline tests still run. \\
-  USA Swimming renames or drops a tracked swimmer
-            & Low  & Med  & \req{REQ-F-60} test catches
-                            person-lookup failure. \\
-  Test host lacks \code{libcurl}
-            & Low  & High & Build phase fails fast; STP cannot
-                            continue. \\
+  Further narrowing of the data-hub interface
+      & High & High & \req{REQ-G-01..04} detect and classify it on
+                      every run; the Postgres mirror is treated as the
+                      system of record. \\
+  A new status is mistaken for an error
+      & Med  & Med  & \req{REQ-F-34} and \req{REQ-F-77} pin the two
+                      already found, both \code{404}; \req{REQ-F-21}
+                      and \req{REQ-F-77a} are the end-to-end checks
+                      that would catch another. \\
+  A roster query goes stale
+      & High & Low  & \req{REQ-F-77} keeps it to one skipped swimmer,
+                      named in the tally.  The remedy is to give the
+                      entry a \code{member\_id}, as \code{kenny} and
+                      \code{keith} now carry. \\
+  Two swimmers merged by a loose name match
+      & Low  & High & \req{DB-20} asserts the guard directly; the
+                      fuzzy tiers cannot touch a row that already has
+                      a member id. \\
+  \code{GetMember} also closes
+      & Med  & Med  & \req{REQ-F-18} fails immediately, distinguishing
+                      this from the broader lockout. \\
+  Session expires mid-run
+      & Low  & Low  & Each run signs in afresh, so the window is one
+                      run; a failure gives partial output plus
+                      \code{RC\_NOPERM}. \\
+  Sign-in flow changes shape
+      & Med  & High & \req{REQ-N-04} is implemented as five discrete
+                      steps, each reporting its own failure, so a
+                      change names the step that broke.
+                      \req{REQ-L-01,02} exercise the failure paths. \\
+  Activation coupling removed or changed
+      & Med  & Med  & \req{REQ-L-06} is structural and \req{REQ-G-03}
+                      behavioural; a change surfaces as tier
+                      \textsc{locked} with \code{401} probes. \\
+  Stored password becomes stale
+      & Med  & Low  & \req{REQ-L-02}'s message is the one the operator
+                      will see; it names the two variables to fix. \\
+  \code{Device-Id} format changes
+      & Low  & High & The service answers \code{400 Invalid Device-Id
+                      format}, which \req{REQ-G-01} surfaces as a
+                      non-200 probe. \\
+  Response schema change
+      & Low  & High & \req{REQ-F-32} detects parse failure on the
+                      first authorized run. \\
+  A future edit reintroduces a fixed defect
+      & Med  & High & \req{REQ-H-01..06} are structural guards written
+                      specifically against CAST-DR-001. \\
+  Test host lacks libcurl or libpq
+      & Low  & High & The build sub-process fails fast and testing is
+                      suspended. \\
+  The shared database's schema moves
+      & Med  & High & \req{DB-04} through \req{DB-11} check the shape
+                      the program depends on, column by column, and
+                      name what changed. \\
+  A fixture is left behind after a failed run
+      & Low  & Low  & Both suites remove the fixture from an
+                      \code{EXIT} trap, so an interrupt or a failing
+                      case still cleans up. \\
+  The sibling loader and this program disagree
+      & Med  & Med  & \code{source\_endpoint} and \code{auth\_mode}
+                      distinguish their rows (\req{DB-18}); neither
+                      deletes or updates the other's. \\
   \bottomrule
 \end{longtable}
 \end{center}
-
-% =================================================================
-\section{Test Strategy}
-% =================================================================
-
-\subsection{Test sub-processes}
-
-Testing is decomposed into five sub-processes, executed in order
-by \code{test-swim-times.sh}:
-
-\begin{description}[style=nextline]
-  \item[Build sub-process.]
-        \code{make tangle compile} produces a fresh executable.
-        Failure here aborts the run.
-  \item[Static sub-process.]
-        Source-code and binary inspection verifies design
-        constraints (\req{REQ-D-*}) and self-documentation
-        (\req{REQ-A-04}).
-  \item[Offline behaviour sub-process.]
-        CLI exit-status and usage-text checks (\req{REQ-F-03},
-        \req{REQ-F-04}) require no network.
-  \item[Online behaviour sub-process.]
-        Functional, performance, and reliability checks issue real
-        REST requests against the data-hub times service.  Skipped
-        cleanly when network is unreachable or the operator sets
-        \code{SWIM\_TIMES\_SKIP\_NETWORK=1}.
-  \item[Database persistence sub-process.]
-        \req{REQ-F-70} \dots\ \req{REQ-F-75} exercise the
-        \code{store} write path and the \code{offline} read path
-        against a local Postgres container.  The application
-        binary reaches the database programmatically through the
-        \texttt{libpq} client library (\req{REQ-I-12}) using a
-        connection string taken from
-        \texttt{SWIM\_TIMES\_PGCONNINFO} or the default
-        \texttt{dbname=swim-times user=postgres host=localhost
-        port=5432}.  The companion bash helper \code{test-db.sh}
-        starts the container via \texttt{pg.sh}, applies
-        \texttt{schema.sql}, and prints a summary of
-        \texttt{swim\_times}; bash test-driver scripts may
-        continue to use \texttt{pg.sh psql} for setup/teardown
-        because that constraint applies only to the application
-        binary, not to test infrastructure.  Tests are skipped
-        cleanly when the database cannot be reached.
-\end{description}
-
-\subsection{Test design techniques}
-
-\begin{description}[style=nextline]
-  \item[Specification-based.]
-        Each functional requirement in the SRS yields one or more
-        test cases driven by inspection of program output.
-  \item[Boundary value.]
-        \code{-o} with all four swimmers and \code{-e} with all
-        thirty-one default events exercise the upper bound of
-        each input domain.
-  \item[Equivalence partition.]
-        Single-swimmer and single-event invocations represent the
-        ``one of many'' equivalence class.
-  \item[Static analysis.]
-        Compiler warnings (\code{-Wall}), CWEB chunk line-count
-        audit, and binary dependency inspection enforce the
-        \req{REQ-D-*} constraints.
-\end{description}
-
-\subsection{Test environment}
-
-\begin{itemize}
-  \item Host: any POSIX.1-2008 system with C99 toolchain,
-        \code{libcurl} 7.0+, \code{cweb}, \code{pdftex}, and
-        \code{bash} 4+.
-  \item Reference development host: macOS 14 with Homebrew
-        \code{curl} and TeX~Live~2025.
-  \item Network: outbound HTTPS to
-        \texttt{usaswimming.sisense.com}.
-  \item Optional Postgres container managed by the project's
-        \texttt{pg.sh} wrapper script (Docker required); only
-        the database persistence tests depend on it.  In its
-        absence those tests skip and the run still gates on the
-        remaining suites.
-\end{itemize}
-
-\subsection{Test data}
-
-The five production swimmer records and the thirty-one
-production event codes serve as test data for the online
-suites.  The database persistence suite uses whatever rows the
-\code{store} sub-test inserts in the same run; no fixture file
-is checked in.  No synthetic REST data is required because
-the system under test is read-only against a live read-only API.
-
-\subsection{Item pass/fail criteria}
-
-\begin{itemize}
-  \item A test passes if its \code{PASS} line is printed.
-  \item A test fails if its \code{FAIL} line is printed.
-  \item A test is skipped (\code{SKIP}) when its preconditions
-        cannot be met (e.g., no network).  Skipped tests do not
-        block release but are tracked.
-  \item The release gate is: zero \code{FAIL} and the count of
-        \code{SKIP} not exceeding the online-test count when run
-        in offline mode.
-\end{itemize}
-
-\subsection{Suspension criteria and resumption requirements}
-
-Testing is suspended if:
-
-\begin{itemize}
-  \item The build sub-process fails (cannot proceed without a
-        binary).
-  \item More than three consecutive online tests fail with
-        identical HTTP error codes (suggests a data-hub-side
-        outage rather than an SUT defect).
-\end{itemize}
-
-Testing resumes once the underlying condition is corrected; the
-full STP shall be re-run from scratch, not partially.
-
-\subsection{Test deliverables}
-
-\begin{itemize}
-  \item This Test Plan (CAST-STP-001).
-  \item The automated test script \code{swim2/test-swim-times.sh}.
-  \item Per-run console output captured by the operator
-        (recommended: \code{./test-swim-times.sh | tee run.log}).
-  \item Updated risk register entries when new failure modes
-        are observed.
-\end{itemize}
-
-% =================================================================
-\section{Test Schedule}
-% =================================================================
-
-\begin{center}
-\begin{tabular}{ll}
-  \toprule
-  \textbf{Trigger}                              & \textbf{Action}                  \\
-  \midrule
-  Any change to \code{swim-times.w}             & Run STP before commit            \\
-  Data-hub \code{Device-Id} format changes       & Run STP after recompile          \\
-  USA Swimming schema change announced          & Run STP, update tests if needed  \\
-  Quarterly maintenance window                  & Run STP unconditionally          \\
-  Pre-release of a tagged version               & Run STP; archive run log         \\
-  \bottomrule
-\end{tabular}
-\end{center}
-
-% =================================================================
-\section{Staffing and Roles}
-% =================================================================
-
-\begin{center}
-\begin{tabular}{ll}
-  \toprule
-  \textbf{Role}        & \textbf{Responsibility}                                \\
-  \midrule
-  Maintainer           & Run STP; resolve any \code{FAIL}; update tests when
-                         requirements change                                    \\
-  Coach (acceptance)   & Verify behavioural tests still match operational need \\
-  Reviewer             & Confirm SRS--STP traceability matrix is current       \\
-  \bottomrule
-\end{tabular}
-\end{center}
-
-No external test team or specialised training is required.  The
-maintainer who edits \code{swim-times.w} is the same individual
-who runs the STP.
-
-% =================================================================
-\section{Test Cases and Traceability}
-% =================================================================
-
-The table below maps every requirement in CAST-SRS-001 to the
-test case in \code{test-swim-times.sh} that verifies it.  Each
-row also gives the test method (D = Demonstration, I = Inspection,
-T = Test, A = Analysis).
-
-\begin{center}
-\begin{longtable}{p{2.6cm}p{1.0cm}p{8.4cm}}
-  \toprule
-  \textbf{SRS req.} & \textbf{Method} & \textbf{Test case in script} \\
-  \midrule\endhead
-  \req{REQ-F-01}    & D & Implicit; exercised by every \code{-o} invocation in the suite \\
-  \req{REQ-F-02}    & D & Implicit; exercised by every \code{-e} invocation in the suite \\
-  \req{REQ-F-03}    & D & Empty-invocation test: \code{rc=1} and \code{Usage:} on stderr \\
-  \req{REQ-F-04}    & D & Unknown-flag test: \code{rc=2} and \code{Usage:} on stderr  \\
-  \req{REQ-F-10}    & D & \code{-o stella} restricts output to one swimmer            \\
-  \req{REQ-F-11}    & D & \code{-e ...} with no swimmer keyword yields seven \code{Swimmer:} lines \\
-  \req{REQ-F-12}    & D & \code{stella} keyword resolves to a row containing ``Evans'' \\
-  \req{REQ-F-13}    & D & \code{ledecky10}/\code{ledecky12}/\code{ledecky14} resolve to a row containing ``Katie Genevieve Ledecky'' \\
-  \req{REQ-F-14}    & I & \code{ledecky10} window [2006-03-17, 2008-03-16] present on the \code{Swimmer} entry; applied to the offline \texttt{SELECT} \\
-  \req{REQ-F-15}    & I & \code{ledecky12} window [2008-03-17, 2010-03-16] present on the \code{Swimmer} entry \\
-  \req{REQ-F-16}    & I & \code{ledecky14} window [2010-03-17, 2012-03-16] present on the \code{Swimmer} entry \\
-  \req{REQ-F-16a}   & T & Online \code{ledecky10} run reports a best time with a non-empty date \\
-  \req{REQ-F-20}    & D & Single-event \code{-e} yields exactly one event section    \\
-  \req{REQ-F-21}    & D & No \code{-e} yields 31 event sections                      \\
-  \req{REQ-F-22}    & D & Event-list count honoured (subset of \req{REQ-F-20})        \\
-  \req{REQ-F-30}    & D & Successful baseline run produces a \code{Swimmer:} line     \\
-  \req{REQ-F-31}    & D & Successful baseline run produces an event section          \\
-  \req{REQ-F-32}    & T & Table row carries a non-empty date, standard, and meet for a known swim \\
-  \req{REQ-F-33}    & A & One \code{BestTimes} POST per stroke-and-distance pair verified by source inspection \\
-  \req{REQ-F-40}    & T & Insertion-sort fastest-first verified on baseline output   \\
-  \req{REQ-F-41}    & D & \code{fastest} mode prints exactly one data row            \\
-  \req{REQ-F-42}    & T & All dates match \code{YYYY-MM-DD} regex                    \\
-  \req{REQ-F-50}    & D & Heading + column header + separator detected               \\
-  \req{REQ-F-51}    & D & CSV header line + at least one data line                   \\
-  \req{REQ-F-52}    & D & Empty-event probe yields \code{(no times found)} (else SKIP) \\
-  \req{REQ-F-60}    & I & Lookup-failure path inspected in \code{lookup\_member\_id} \\
-  \req{REQ-F-61}    & I & Per-event failure-then-continue inspected in \code{fetch\_times} \\
-  \req{REQ-F-70}    & T & \code{store,csv} run inserts $\geq$1 row into \texttt{swim\_times} and prints CSV (DB-gated) \\
-  \req{REQ-F-71}    & T & \code{offline,csv} run reads $\geq$1 previously stored row (DB-gated) \\
-  \req{REQ-F-72}    & T & \code{offline} run completes with \texttt{SWIM\_TIMES\_SKIP\_NETWORK=1} (DB-gated) \\
-  \req{REQ-F-73}    & T & Repeated \code{store} run leaves \texttt{count(*)} unchanged (DB-gated) \\
-  \req{REQ-F-74}    & I & Missing-\texttt{libpq}-connection warning path inspected in \code{db\_open} \\
-  \req{REQ-F-75}    & T & Re-\code{store} run exits 0 with no stderr (ON CONFLICT DO NOTHING) (DB-gated) \\
-  \req{REQ-I-01}    & I & No \code{stdin} read in source                              \\
-  \req{REQ-I-10}    & A & \code{otool}/\code{ldd} confirms libcurl link               \\
-  \req{REQ-I-11}    & I & Header strings \code{Content-Type} and \code{Authorization} present in source \\
-  \req{REQ-I-12}    & I & \code{db\_conn\_string} reads \texttt{SWIM\_TIMES\_PGCONNINFO}; binary linkage includes \texttt{libpq} \\
-  \req{REQ-I-20}    & A & \code{https://usaswimming.sisense.com} substring present, no \code{http://} \\
-  \req{REQ-P-01}    & D & Sample timing extrapolated to 160 requests $<$ 300 s        \\
-  \req{REQ-P-02}    & D & Single query measured $<$ 10 s                              \\
-  \req{REQ-P-03}    & D & Offline single query measured $<$ 2 s (DB-gated, manual)    \\
-  \req{REQ-D-01}    & A & Compile under \code{-O2 -Wall} produces no warnings         \\
-  \req{REQ-D-02}    & I & \code{swim-times.c} regenerable from \code{swim-times.w}    \\
-  \req{REQ-D-03}    & A & CWEB chunk line-count audit (awk pass)                     \\
-  \req{REQ-D-04}    & A & Binary dependency list contains only \{libc, libcurl, libpq, TLS, support libs\} \\
-  \req{REQ-D-10}    & I & \texttt{schema.sql} declares \texttt{swim\_times} with the UNIQUE constraint per \req{REQ-F-73} \\
-  \req{REQ-A-01}    & T & Two consecutive runs produce byte-identical output         \\
-  \req{REQ-A-02}    & I & Token and URL declared as named constants                   \\
-  \req{REQ-A-03}    & D & Build on a second POSIX host (manual; quarterly)           \\
-  \req{REQ-A-04}    & D & \code{cweave} + \code{pdftex} produces \code{swim-times.pdf} \\
-  \bottomrule
-\end{longtable}
-\end{center}
-
-\noindent
-Tests marked \textbf{I} (Inspection) are recorded in this plan and
-in code review checklists rather than being executed by the
-automated script.  All others are executed by
-\code{test-swim-times.sh}.
 
 % =================================================================
 \section{Approvals}
 % =================================================================
 
 \begin{center}
-\begin{tabular}{lll}
+\begin{tabular}{p{5cm}p{5cm}p{3cm}}
   \toprule
-  \textbf{Role}                & \textbf{Name}            & \textbf{Date}  \\
+  \textbf{Role} & \textbf{Name} & \textbf{Date} \\
   \midrule
-  Maintainer (author)          & \rule{4cm}{0.4pt}        & \rule{2cm}{0.4pt} \\
-  Coach (acceptance)           & \rule{4cm}{0.4pt}        & \rule{2cm}{0.4pt} \\
-  Reviewer                     & \rule{4cm}{0.4pt}        & \rule{2cm}{0.4pt} \\
+  Prepared by (Test Lead)   & \rule{4.5cm}{0.4pt} & \rule{2.5cm}{0.4pt} \\[1.2em]
+  Reviewed by (Maintainer)  & \rule{4.5cm}{0.4pt} & \rule{2.5cm}{0.4pt} \\[1.2em]
+  Approved by (CAST)        & \rule{4.5cm}{0.4pt} & \rule{2.5cm}{0.4pt} \\
   \bottomrule
 \end{tabular}
-\end{center}
-
-\vfill
-\begin{center}
-  \small\textit{End of document CAST-STP-001 Rev.\,1.0}
 \end{center}
 
 \end{document}

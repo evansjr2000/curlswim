@@ -47,8 +47,8 @@
   {\normalsize Prepared by: CAST Technology Working Group}\\[2em]
   \begin{tabular}{ll}
     Document identifier: & CAST-SRS-001                                     \\
-    Revision:            & 2.0                                              \\
-    Date:                & July 11, 2026                                   \\
+    Revision:            & 6.0                                              \\
+    Date:                & September 18, 2026                              \\
     Status:              & Released                                         \\
     Governing standard:  & ISO/IEC/IEEE 29148-2018 (Requirements Engineering) \\
   \end{tabular}
@@ -210,13 +210,34 @@ The program has two user classes:
 \subsection{Assumptions and dependencies}
 
 \begin{itemize}
-  \item USA~Swimming continues to expose the public REST endpoints
-        \code{times-api.usaswimming.org/swims/TimesSearch/%
-        GetMembersForFilters} and
-        \code{.../swims/TimesSearch/BestTimes} to anonymous callers.
+  \item \textbf{Live retrieval requires a signed-in caller.}  As of
+        2026 the USA~Swimming data hub answers reference queries
+        anonymously but refuses \code{GetMembersForFilters},
+        \code{BestTimes}, and every other search or times endpoint with
+        \code{403 Forbidden} unless \code{Usas-Sub-Id} names a
+        signed-in subject.  Revision 1.0 of this document assumed
+        anonymous access; that assumption is withdrawn.  See
+        CAST-DR-001.
+  \item \textbf{A USA~Swimming account is available.}  Revision 4.0
+        makes signing in the program's default and only online
+        behaviour (\req{REQ-N-01}); the operator is assumed to hold an
+        account whose credentials are stored per \req{REQ-N-02}.
+  \item \textbf{A newly-issued session must be activated} before the
+        times API will honour it (\req{REQ-N-05}).  This is an observed
+        property of the service, not a documented one, and may change
+        without notice; \req{REQ-G-01} is what would detect the
+        change.
+  \item \code{GET .../TimesSearch/GetMember/$\langle$memberId$\rangle$}
+        and the \code{SearchFilter/*} reference feeds remain open to
+        anonymous callers.  This is not guaranteed to persist and the
+        program shall detect its loss rather than assume it
+        (\req{REQ-G-01}).
   \item Each \code{BestTimes} record continues to carry the fields
         \code{eventCode}, \code{swimTime}, \code{swimDate},
         \code{timeStandard}, and \code{meetName}.
+  \item The local Postgres mirror is the system of record for any
+        deployment without USA~Swimming credentials; \code{-o offline}
+        is its read path.
   \item No swimmer of interest has more than 200 recorded times in
         any single event (matches the \code{MAX\_TIMES} compile-time
         constant).
@@ -298,6 +319,22 @@ The program has two user classes:
 \label{sec:roster}
 
 \begin{description}[style=nextline]
+  \item[\req{REQ-F-05}] The usage text shall document every behaviour
+        keyword (\code{fastest}, \code{csv}, \code{store},
+        \code{offline}, \code{diag}, \code{selftest}), the \code{-m}
+        flag, and the environment variables \code{USAS\_SUB\_ID} and
+        \code{USAS\_SESSION\_ID}.
+  \item[\req{REQ-F-06}] The roster listing in the usage text shall be
+        generated from the \code{SWIMMERS} table, so that it cannot
+        drift out of step with the roster it describes.
+  \item[\req{REQ-F-07}] \code{diag} and \code{offline} shall be
+        rejected as mutually exclusive, with exit status
+        \code{RC\_USAGE}.
+  \item[\req{REQ-F-18}] The program shall accept
+        \code{-m $\langle$memberId$\rangle$}, which fetches that member
+        directly through \code{GetMember} and bypasses both the roster
+        and the member search.  A roster entry carrying a known
+        \code{member\_id} shall take the same short cut automatically.
   \item[\req{REQ-F-17}] The program shall be designed to fetch times
         for exactly the swimmers listed in Table~\ref{tab:roster}.
         Each row gives the swimmer's full name, the unique id (alias)
@@ -385,6 +422,11 @@ The program has two user classes:
         returned record: \code{eventCode}, \code{swimTime},
         \code{swimDate}, \code{timeStandard} (the motivational
         standard), and \code{meetName}.
+  \item[\req{REQ-F-34}] A \code{404} from \code{BestTimes} shall be
+        treated as ``this swimmer has no time in that stroke and
+        distance'', not as an error: the event shall report
+        \code{(no times found)} and the run shall continue.  For a
+        young swimmer most of the thirty-one events answer this way.
   \item[\req{REQ-F-33}] The program shall cache all records returned
         for a member and answer every per-event query from that cache,
         issuing no more than one \code{BestTimes} POST per distinct
@@ -444,6 +486,41 @@ The program has two user classes:
         \texttt{INSERT \dots\ ON~CONFLICT~DO~NOTHING} per row.
         \code{store} composes with \code{csv}: stdout still
         receives the CSV stream while the rows are persisted.
+  \item[\req{REQ-F-77}] A swimmer the USA~Swimming directory does not
+        hold shall be skipped, not treated as a failure.  The member
+        search answers \code{404} when no member matches the name, and
+        the by-id lookup answers \code{404} for an unknown id; both mean
+        ``there is no such swimmer'', which is a fact about one roster
+        entry.  The run shall warn, count the entry, and continue with
+        the next swimmer.  Any other non-\code{200} remains fatal.
+  \item[\req{REQ-F-77a}] The count of skipped swimmers shall be
+        repeated at the end of the run, where it cannot be lost in the
+        output.  A run in which no swimmer at all resolved shall exit
+        \code{RC\_UNAVAIL}; a run that fetched some and skipped others
+        shall exit \code{RC\_OK}.
+  \item[\req{REQ-F-78}] Before inserting a swimmer the program shall
+        look for an existing row in three tiers: by \code{member\_id};
+        by \code{full\_name} compared case-insensitively; and by first
+        and last name only, likewise case-insensitively, which bridges
+        the difference between a recorded middle initial and a returned
+        middle name.  The second and third tiers shall apply
+        \emph{only} to rows whose \code{member\_id} is \code{NULL}.  A
+        row already carrying a different member id denotes a different
+        swimmer however alike the names, and merging two swimmers is a
+        worse outcome than duplicating one.
+  \item[\req{REQ-F-79}] A loose match shall link the existing row
+        rather than rename it: \code{member\_id}, \code{lsc\_code}, and
+        \code{club\_name} are filled in where absent, and
+        \code{full\_name} is left as the database already had it.
+  \item[\req{REQ-F-80}] An insert refused because another swimmer
+        already holds that name shall be reported, naming the swimmer,
+        and her times skipped.  The program shall not attach one
+        swimmer's times to another.
+  \item[\req{REQ-F-76}] The offline read shall report every swim
+        recorded for the swimmer in the requested event, joining
+        \texttt{swim} to \texttt{swimmer} and, by outer join,
+        to \texttt{meet}.  This includes rows written by the sibling
+        loader and not only those this program wrote.
   \item[\req{REQ-F-71}] When the \code{offline} keyword is
         supplied, the program shall read swim rows from the local
         Postgres \texttt{swim-times} database and emit them in the
@@ -472,6 +549,121 @@ The program has two user classes:
         (This realises requirement~\#4 of \texttt{requirements4.txt}.)
 \end{description}
 
+\subsection{Authentication requirements}
+
+Added in revision 4.0.  They replace the credential-passing scheme of
+revision 3.0, in which the operator was expected to extract a session
+from a browser by hand.
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-N-01}] Every run that is not \code{offline} shall sign
+        in to the USA~Swimming data hub before issuing any query.  The
+        program shall not attempt an unauthenticated search or times
+        query, and shall not fall back to one when a signed-in request
+        fails.
+  \item[\req{REQ-N-02}] Credentials shall be read from the file named
+        by \code{USAS\_ENV\_FILE}, defaulting to
+        \code{\$HOME/.usas-env}, in shell assignment syntax
+        (\code{[export] NAME="value"}).  The file shall be
+        \emph{parsed}, never executed, and only names prefixed
+        \code{USAS\_} shall be adopted --- such a file may carry
+        settings intended for other programs, and adopting them would
+        silently change this program's behaviour.
+  \item[\req{REQ-N-03}] A value already present in the environment
+        shall take precedence over the same name in the file.
+  \item[\req{REQ-N-04}] The program shall obtain a subject and session
+        id by completing the data hub's OpenID~Connect
+        authorization-code flow: begin at the back-end-for-front-end,
+        submit the identity provider's login form with the stored
+        credentials and its antiforgery token, exchange the resulting
+        authorization code, and read \code{sub} and \code{sid} from the
+        user-info endpoint.
+  \item[\req{REQ-N-05}] After obtaining a session the program shall
+        call \code{POST security/auth/GetDataHubSecurityInfoForIdp}
+        with that \code{sub} and \code{sid}.  Until this call is made
+        the times API answers \code{401} for the new session; after it,
+        \code{200}.
+  \item[\req{REQ-N-06}] A sign-in failure shall be reported in terms of
+        its cause --- absent credentials, rejected credentials, or a
+        failed step --- and shall exit \code{RC\_NOPERM}.  In
+        particular, credentials rejected by the identity provider shall
+        not be reported as the \code{HTTP 200} the provider answers
+        with.
+  \item[\req{REQ-N-07}] \code{offline} shall require no credentials and
+        shall attempt no sign-in.
+  \item[\req{REQ-N-08}] No credential shall be written to standard
+        output, to the database, or to any file.  The greeting naming
+        the signed-in user shall be suppressed in \code{csv} mode,
+        where it would corrupt the output.
+\end{description}
+
+\subsection{Diagnostic requirements}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-G-01}] The program shall provide a \code{-o diag}
+        mode that probes at least one endpoint from each data-hub
+        access class --- reference feed, single-member lookup, member
+        search, and times query --- and reports each probe's HTTP
+        status.  It shall exit \code{RC\_OK} regardless of what the
+        probes return, since reporting a refusal is a successful
+        diagnosis.
+  \item[\req{REQ-G-02}] \code{-o diag} shall report the outcome of the
+        sign-in attempt and the identity the program is presenting: the
+        \code{Usas-Sub-Id} in force, whether a session id is set, and
+        the \code{Device-Id} being sent.
+  \item[\req{REQ-G-03}] The output of \code{-o diag} shall be
+        sufficient, on its own, to distinguish an authorised client
+        from absent credentials, from rejected credentials, from a
+        signed-in caller the service still refuses, from an outage.
+  \item[\req{REQ-G-04}] \code{-o diag} is the one mode that may proceed
+        after a failed sign-in, since reporting what an unauthenticated
+        caller can still reach is the diagnosis being asked for.  It
+        shall label the probe as unauthenticated when it does so.
+\end{description}
+
+\subsection{Error-reporting and exit-status requirements}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-E-01}] Process exit status shall distinguish the
+        categories of outcome: \code{0} success; \code{2}
+        (\code{RC\_USAGE}) a command-line error; \code{69}
+        (\code{RC\_UNAVAIL}) the data hub could not be reached or
+        failed for a reason other than authorisation; \code{77}
+        (\code{RC\_NOPERM}) the data hub refused the request for want
+        of credentials.
+  \item[\req{REQ-E-02}] Every diagnostic arising from an HTTP response
+        shall name the operation attempted, the HTTP status with its
+        reason phrase, and the URL.  No diagnostic shall assert a cause
+        the program has not observed.
+  \item[\req{REQ-E-03}] Remedial advice for an authorisation failure
+        shall be printed at most once per run.
+  \item[\req{REQ-E-04}] An authorisation failure shall abandon the run
+        rather than reissue the same refused request for each remaining
+        event and swimmer.
+  \item[\req{REQ-E-05}] A transport failure shall be reported with
+        libcurl's own description of the error, distinctly from an
+        HTTP-level failure.
+\end{description}
+
+\subsection{Cryptographic requirements}
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-S-01}] The \code{rate-key} header presented by a
+        signed-in caller shall be computed as
+        $\lfloor t/s \rfloor$, a period, and the lower-case
+        hexadecimal HMAC-SHA256 of the decimal spelling of $t$ keyed by
+        the session id, where $t$ is the Unix time in milliseconds
+        divided by $10^{4}$ and $s$ is the number of seconds elapsed
+        since midnight UTC.
+  \item[\req{REQ-S-02}] SHA-256 and HMAC-SHA256 shall be implemented
+        within the literate source.  No cryptographic library shall be
+        introduced as a dependency (see \req{REQ-D-04}).
+  \item[\req{REQ-S-03}] The program shall provide a \code{-o selftest}
+        mode that verifies both primitives against the published
+        vectors of FIPS~180-4 and RFC~4231 and exits non-zero if any
+        vector fails.
+\end{description}
+
 \subsection{External interface requirements}
 
 \subsubsection{User interfaces}
@@ -487,26 +679,91 @@ The program has two user classes:
 \begin{description}[style=nextline]
   \item[\req{REQ-I-10}] The program shall use the
         \code{libcurl} ``easy'' interface for all HTTP transport.
-  \item[\req{REQ-I-11}] The program shall send the headers
-        \code{Content-Type: application/json} and
-        \code{Authorization: Bearer \{token\}} on every JAQL
-        request.
+  \item[\req{REQ-I-11}] The program shall send the data-hub headers
+        \code{Content-Type: application/json}, \code{AppName: DataHub},
+        \code{Usas-Sub-Id}, and \code{Device-Id} on every request, plus
+        \code{Origin} and \code{Referer} naming the data-hub front end.
+        When a session id is configured --- which, after
+        \req{REQ-N-01}, is every online request --- it shall
+        additionally send \code{Usas-Session-Id} and \code{rate-key}.  It shall send no
+        \code{Authorization} header (the service uses none) and no
+        \code{Accept} header (see \req{REQ-H-05}).
   \item[\req{REQ-I-12}] The program shall reach Postgres
         \emph{programmatically} through the \texttt{libpq} client
         library --- never by spawning \texttt{psql} or any other
         external script (this realises requirement~\#3 of
-        \texttt{requirements4.txt}).  The connection string shall
-        be taken from the \texttt{SWIM\_TIMES\_PGCONNINFO}
-        environment variable when set, otherwise the default
-        keyword string \texttt{dbname=swim-times user=postgres
-        host=localhost port=5432}.
+        \texttt{requirements4.txt}).
+  \item[\req{REQ-I-13}] The program shall use exactly one database,
+        \texttt{swimming} on host \texttt{100.77.243.69}, named in a
+        compiled-in constant.  There shall be no environment override:
+        \texttt{SWIM\_TIMES\_PGCONNINFO} is withdrawn.  The database is
+        shared with another loader, and a run that silently wrote
+        elsewhere --- to a stale local copy, say --- would appear to have
+        succeeded while contributing nothing.
+  \item[\req{REQ-I-14}] The program shall adapt to that database's
+        normalised schema rather than introduce a table of its own.
+        Specifically: a swimmer shall be resolved to a
+        \texttt{swimmer\_key} by \texttt{member\_id} \emph{or}
+        \texttt{full\_name} (both are UNIQUE and some rows predate the
+        member id), creating or refreshing the row as needed; a meet
+        shall be resolved to a \texttt{meet\_key} by name, creating it
+        if new; and a swim shall be written to \texttt{swim} with
+        \texttt{source\_endpoint = 'BestTimes'} and
+        \texttt{auth\_mode = 'authenticated'}.
+  \item[\req{REQ-I-15}] Because \texttt{swim.swim\_time\_id} is a
+        primary key with no default and \texttt{BestTimes} returns no
+        \texttt{swimTimeId}, the program shall synthesise one: the
+        leading 63 bits of the SHA-256 of the row's natural key,
+        negated.  The value shall be stable across runs, so that a
+        re-fetch reproduces it, and negative, so that it cannot collide
+        with an id the service itself issued.
+  \item[\req{REQ-I-16}] A motivational standard absent from the
+        \texttt{time\_standard} reference table --- the elite labels
+        \texttt{Nats}, \texttt{Trials}, \texttt{Summer Jrs} --- shall be
+        written as SQL \texttt{NULL}, the foreign key admitting no
+        other value.  The label shall still appear in the printed table
+        and in the CSV, neither of which is constrained by the schema.
+  \item[\req{REQ-I-17}] Writes shall be idempotent: a repeated fetch
+        shall add no rows.  \texttt{ON CONFLICT DO NOTHING} without a
+        target satisfies both the natural-key constraint and the
+        primary key.
 \end{description}
 
 \subsubsection{Communication interfaces}
 
 \begin{description}[style=nextline]
   \item[\req{REQ-I-20}] All network communication shall use HTTPS
-        (TLS) to the host \texttt{usaswimming.sisense.com}.
+        (TLS) to the host \texttt{times-api.usaswimming.org}.  No
+        plaintext HTTP URL for any USA~Swimming host shall appear in
+        the source.
+\end{description}
+
+\subsubsection{HTTP transport contract}
+
+These requirements were added in revision 3.0 following CAST-DR-001.
+Their absence is why the defect recorded there escaped detection: the
+transport layer discarded the one observation that would have explained
+the outage.
+
+\begin{description}[style=nextline]
+  \item[\req{REQ-H-01}] The HTTP request function shall return the
+        response's HTTP status code to its caller.
+  \item[\req{REQ-H-02}] That status shall be obtained from libcurl via
+        \code{curl\_easy\_getinfo(\dots, CURLINFO\_RESPONSE\_CODE,
+        \dots)} and not inferred from any other signal.
+  \item[\req{REQ-H-03}] A response that completed but carried no body
+        shall be returned as an empty string.  A null return shall mean
+        that the request did not complete, and shall mean nothing else.
+  \item[\req{REQ-H-04}] The request function shall set both a
+        whole-transfer timeout and a connect timeout, so that an
+        unresponsive host cannot stall a run indefinitely.
+  \item[\req{REQ-H-05}] The program shall not send an \code{Accept}
+        header.  The service's content negotiation responds to
+        \code{Accept: application/json} by returning its payload
+        re-encoded as a single escaped JSON string, which the response
+        scanner cannot parse.
+  \item[\req{REQ-H-06}] Every site that consumes an HTTP response shall
+        check the status before parsing the body.
 \end{description}
 
 \subsection{Performance requirements}
@@ -521,7 +778,7 @@ The program has two user classes:
         residential broadband connection.
   \item[\req{REQ-P-02}] A single-swimmer single-event query
         (\code{-o stella -e "100 FR SCY"}) shall complete within
-        ten seconds under normal Sisense response time.
+        ten seconds under normal data-hub response time.
   \item[\req{REQ-P-03}] An offline single-swimmer single-event
         query (\code{-o stella,offline -e "100 FR SCY"}) shall
         complete within two seconds against a local Postgres
@@ -551,17 +808,21 @@ The program has two user classes:
         the seven application columns listed in REQ-F-32 plus an
         identity primary key and a \texttt{fetched\_at} timestamp,
         and shall declare a UNIQUE constraint per REQ-F-73.
+  \item[\req{REQ-D-11}] No credential --- bearer token, session id, or
+        subject --- shall appear in the source text.  All credentials
+        shall be read from the environment at run time.
 \end{description}
 
 \subsection{Software system attributes}
 
 \begin{description}[style=nextline]
   \item[\req{REQ-A-01} (Reliability)] The program shall produce
-        identical output for identical Sisense responses on
+        identical output for identical data-hub responses on
         repeated invocations.
-  \item[\req{REQ-A-02} (Maintainability)] All Sisense endpoint
-        URLs and bearer tokens shall be declared as named
-        constants in clearly identifiable CWEB chunks.
+  \item[\req{REQ-A-02} (Maintainability)] All data-hub endpoint URLs
+        shall be declared as named constants in clearly identifiable
+        CWEB chunks.  Credentials shall not be declared there at all
+        (\req{REQ-D-11}).
   \item[\req{REQ-A-03} (Portability)] The program shall build
         and run unmodified on any POSIX.1-2008 system with
         \code{libcurl} 7.0 or later installed.
@@ -602,8 +863,9 @@ documented separately in the swim-times Verification Plan.
   \toprule
   \textbf{Requirement} & \textbf{Method} \\
   \midrule\endhead
-  REQ-F-01 \ldots REQ-F-04 & Demonstration \\
+  REQ-F-01 \ldots REQ-F-07 & Demonstration \\
   REQ-F-10 \ldots REQ-F-16 & Demonstration \\
+  REQ-F-18                 & Demonstration \\
   REQ-F-20 \ldots REQ-F-22 & Demonstration \\
   REQ-F-30 \ldots REQ-F-33 & Inspection + Demonstration \\
   REQ-F-40 \ldots REQ-F-42 & Test \\
@@ -611,10 +873,24 @@ documented separately in the swim-times Verification Plan.
   REQ-F-60 \ldots REQ-F-61 & Demonstration \\
   REQ-F-70 \ldots REQ-F-75 & Test (DB-gated) \\
   REQ-I-01 \ldots REQ-I-20 & Inspection \\
+  REQ-H-01 \ldots REQ-H-06 & Inspection of \texttt{swim-times.w} \\
+  REQ-E-01 \ldots REQ-E-05 & Test (tier-gated) \\
+  REQ-S-01 \ldots REQ-S-03 & Test (known-answer vectors) \\
+  REQ-G-01 \ldots REQ-G-04 & Demonstration (\texttt{-o diag}) \\
+  REQ-N-01, REQ-N-06, REQ-N-07 & Test (sign-in failure paths) \\
+  REQ-N-02, REQ-N-03 & Test (fixture credentials file) \\
+  REQ-N-04, REQ-N-05 & Demonstration (live sign-in) + Inspection \\
+  REQ-N-08 & Inspection + Test (CSV cleanliness) \\
+  REQ-F-34 & Demonstration (all-events run) \\
+  REQ-I-13 \ldots REQ-I-17 & Inspection + Test (\texttt{test-db.sh}) \\
+  REQ-F-76 & Test (joined offline read) \\
+  REQ-F-77, REQ-F-77a & Test (absent swimmer) \\
+  REQ-F-78 \ldots REQ-F-80 & Test (\texttt{test-db.sh} DB-19, DB-20) \\
   REQ-P-01, REQ-P-02, REQ-P-03 & Demonstration (timed) \\
   REQ-D-01, REQ-D-02, REQ-D-04 & Inspection \\
   REQ-D-03                 & Analysis (CWEB chunk line-count audit) \\
   REQ-D-10                 & Inspection of \texttt{schema.sql} \\
+  REQ-D-11                 & Inspection (credential pattern scan) \\
   REQ-A-01                 & Test \\
   REQ-A-02, REQ-A-04       & Inspection \\
   REQ-A-03                 & Demonstration (build on second POSIX host) \\
@@ -624,7 +900,7 @@ documented separately in the swim-times Verification Plan.
 
 \vfill
 \begin{center}
-  \small\textit{End of document CAST-SRS-001 Rev.\,1.0}
+  \small\textit{End of document CAST-SRS-001 Rev.\,6.0}
 \end{center}
 
 \end{document}

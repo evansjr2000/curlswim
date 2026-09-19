@@ -1,0 +1,9 @@
+1.  Always, when not using the option "offline," try to login with the credentials in the
+file /Users/evansjr/.usas-env.  Then see if the program can get the swim times of the
+swimmer requested.
+
+2.  If it works, make this the default behavior of the program. Do not use anonymous access.
+
+3. Update the program, test scripts,  and the documentation appropriately.
+
+

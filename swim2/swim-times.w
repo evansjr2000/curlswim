@@ -39,9 +39,15 @@ services at \.{times-api.usaswimming.org}.
 JAQL analytics API; it has since moved to first-party REST services,
 and this program follows.  We make two kinds of requests:
 
-\medskip\item{1.} A {\it member search\/} (\.{GetMembersForFilters}) to
+\medskip\item{0.} A {\it sign-in\/}, once per run, which exchanges a
+  stored user name and password for a subject and session id and then
+  activates that session (see {\it Sign-in\/}).
+
+\item{1.} A {\it member search\/} (\.{GetMembersForFilters}) to
   resolve the swimmer's |memberId|, given a name string and a substring
-  to match the returned full name.
+  to match the returned full name.  When a swimmer's |memberId| is
+  already known it is taken from the roster and this call is skipped
+  in favour of the cheaper \.{GET /GetMember/<id>}.
 
 \item{2.} A {\it best-times fetch\/} (\.{POST /BestTimes}) issued once
   per stroke-and-distance pair; each record delivers a stroke, distance,
@@ -53,6 +59,51 @@ and this program follows.  We make two kinds of requests:
 
 All HTTP communication is handled by \.{libcurl}.  JSON responses are
 scanned with simple string operations rather than a full parse tree.
+
+@ {\bf Authentication, and the 2026 access change.}  The data hub has
+never used a bearer token for public data.  A caller identifies itself
+with three headers --- \.{AppName: DataHub}, a client-minted
+\.{Device-Id}, and \.{Usas-Sub-Id}, which carries either a signed-in
+subject or the literal string \.{Anonymous}.  A signed-in caller adds
+two more, \.{Usas-Session-Id} and \.{rate-key}, the latter an
+HMAC-SHA256 of the current ten-second epoch bucket keyed by the session
+id.
+
+Through 2025 the times endpoints answered anonymous callers, and this
+program relied on that.  They no longer do.  As of this writing the
+service partitions its surface in three:
+
+\medskip
+\item{$\bullet$} {\it Open to anonymous callers:} the reference feeds
+  (\.{SearchFilter/GetAllEvents}, \.{SearchFilter/GetLscs},
+  \.{TimesSearch/GetTimeStandard\dots}) and the single-member lookup
+  \.{TimesSearch/GetMember/<memberId>}.
+
+\item{$\bullet$} {\it Closed with \.{403 Forbidden}:} every search and
+  every times query --- \.{GetMembersForFilters}, \.{BestTimes},
+  \.{GetBestTimesForMember}, \.{GetAllTimesForFilters},
+  \.{GetTopTimesLeaderBoard}, \.{Ranking/Search}, \.{Records/SFSearch}.
+
+\item{$\bullet$} {\it Rejected with \.{401 Unauthorized}:} anything sent
+  without a recognised \.{Usas-Sub-Id} at all.
+\medskip
+
+\noindent The front end agrees: \.{POST security/auth/%
+GetDataHubSecurityInfoForIdp} with subject \.{Anonymous} returns a
+route table containing only \.{"/"}, so the browser redirects an
+anonymous visitor to the login page before it ever issues a times
+query.
+
+Consequently the program {\it signs in\/}.  Every online run begins by
+reading a user name and password from a credentials file and walking
+the data hub's OpenID~Connect flow to obtain a subject and a session
+id, which then authenticate every request; the whole sequence is
+described under {\it Sign-in\/} below.  There is no anonymous path and
+no anonymous fallback --- an unauthenticated search or times query is
+simply a slower route to \.{403}, so the program does not attempt one.
+\.{-o offline} needs no credentials at all, and \.{-o diag} reports the
+sign-in result together with a reachability table for all five endpoint
+classes.
 
 @ {\bf Literate programming.}
 Donald Knuth introduced {\it literate programming\/} in 1984 as a way of
@@ -103,6 +154,7 @@ output is:
 @<Type definitions@> @/
 @<HTTP utilities@> @/
 @<JSON scanner@> @/
+@<Sign-in machinery@> @/
 @<Database pipe@> @/
 @<Person lookup@> @/
 @<Times fetch@> @/
@@ -115,6 +167,7 @@ output is:
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <time.h>
 #include <curl/curl.h>
@@ -134,27 +187,71 @@ single module exceeds twenty-four lines.
 @<Data hub credentials@>
 @<Event table@>
 
-@ The two numeric limits used throughout the program.
+@ The numeric limits used throughout the program, the two HTTP timeouts
+(so a hung data-hub connection cannot wedge a run indefinitely), and the
+process exit codes.  |RC_NOPERM| is returned when the data hub refused
+the request for want of credentials and |RC_UNAVAIL| when it failed for
+any other reason, so a wrapper script can tell ``sign in'' from ``try
+again later''.
 
 @<Numeric constants@>=
 #define NUM_EVENTS 31
 #define MAX_TIMES  200
+#define HTTP_TIMEOUT_SECS  30   /* whole-request ceiling      */
+#define HTTP_CONNECT_SECS  10   /* TCP+TLS handshake ceiling  */
+#define RC_OK       0           /* success                    */
+#define RC_ERROR    1           /* generic failure            */
+#define RC_USAGE    2           /* bad command line           */
+#define RC_UNAVAIL 69           /* data hub unreachable       */
+#define RC_NOPERM  77           /* data hub refused: sign in  */
 
-@ The base URL of the times service.  Note there is deliberately no
+@ The base URLs of the times service.  Note there is deliberately no
 hard-coded bearer token here.  The USA~Swimming data hub retired the
 Sisense JAQL API this program originally targeted (its embedded token
 now returns \.{401 db\_unauthorized}, and the current front-end no
 longer exposes any Sisense credential).  The replacement REST services
-at \.{times-api.usaswimming.org} authenticate anonymous callers not
-with a bearer token but with three custom headers --- |Usas-Sub-Id:
-Anonymous|, |AppName: DataHub|, and a client-generated |Device-Id|.
-The |Device-Id| is minted at run time by |build_device_id| (see the
-HTTP utilities), so the ``token'' is obtained dynamically on every run
-rather than baked into the source.
+at \.{times-api.usaswimming.org} authenticate with four custom headers
+--- |AppName: DataHub|, a client-generated |Device-Id|, |Usas-Sub-Id|
+(the signed-in subject, or the literal \.{Anonymous}), and, for a
+signed-in caller, |Usas-Session-Id| together with a computed
+|rate-key|.  The |Device-Id| is minted at run time by |device_id|, and
+the credentials come from the environment; nothing is baked into the
+source.  |SWIMS_API| is the service root and |TIMES_API| the
+\.{TimesSearch} controller beneath it; the reference feeds used by
+\.{-o diag} hang off the root rather than the controller.
+|DIAG_MEMBER| is a well-known public |memberId| (Katie Ledecky's) used
+only as a probe target by the diagnostics.
 
 @<Data hub credentials@>=
+static const char SWIMS_API[] =
+    "https://times-api.usaswimming.org/swims";
 static const char TIMES_API[] =
     "https://times-api.usaswimming.org/swims/TimesSearch";
+@<Sign-in endpoints@>
+#define DIAG_MEMBER "6CD35348E5824C"
+#define HTTP_USER_AGENT "swim-times/3.0 (+literate CWEB client; libcurl)"
+
+@ The three services the sign-in sequence walks through: the data hub's
+back-end-for-front-end, which owns the OpenID~Connect dance; the
+identity provider, which owns the password form; and the security
+service, whose |SECURITY_INFO| endpoint both reports the caller's
+permissions and --- crucially --- activates the new session for the
+times API.  |ENV_FILE_DEFAULT| is where the credentials live when
+|USAS_ENV_FILE| does not say otherwise.
+
+@<Sign-in endpoints@>=
+static const char BFF_LOGIN[] =
+    "https://dhy-prod.usaswimming.org/bff/login?returnUrl=%2F";
+static const char BFF_SIGNIN[] =
+    "https://dhy-prod.usaswimming.org/signin-oidc";
+static const char BFF_USERINFO[] =
+    "https://dhy-prod.usaswimming.org/bff/userinfo";
+static const char IDP_LOGIN[] =
+    "https://login.usaswimming.org/Login";
+static const char SECURITY_INFO[] =
+    "https://security-api.usaswimming.org/security/auth/"
+    "GetDataHubSecurityInfoForIdp";
+#define ENV_FILE_DEFAULT "/.usas-env"
 
 @ The event-code table is split into SCY and LCM sub-lists so the
 array initialiser fits within the line limit.
@@ -218,6 +315,24 @@ If no options are given at all the program prints a usage message and exits.
 #define OPT_CSV       (1<<1)  /* emit CSV lines instead of a table        */
 #define OPT_STORE     (1<<2)  /* also persist rows to Postgres            */
 #define OPT_OFFLINE   (1<<3)  /* read from Postgres, skip network         */
+#define OPT_DIAG      (1<<4)  /* probe data-hub reachability and exit     */
+#define OPT_SELFTEST  (1<<5)  /* run the SHA-256/HMAC vectors and exit    */
+
+@ |g_not_found| distinguishes the two ways a lookup can return |NULL|.
+``The service would not answer'' must stop the run --- the next swimmer
+will fare no better.  ``The service answered, and this person is not in
+it'' must not: it is a fact about one roster entry, and the remaining
+swimmers are unaffected.  Conflating them is a defect this revision
+repairs; see the person lookup.  |g_missing| counts the second kind so
+the run can say at the end how many entries it skipped.
+
+@ The three |g_cur_| variables carry the swimmer currently being
+processed from the person lookup, which is where the data hub reports
+her club and LSC, to |db_insert_row|, which needs them to fill in the
+shared schema's |swimmer| row.  They are globals rather than arguments
+because the path between the two runs through |fetch_times| and the
+shared sort-and-emit chunk, neither of which has any other reason to
+know about them.
 
 @ These are the behaviour flags (how to render or where to read/write).
 Swimmer {\it selection\/}---which people to fetch---is no longer encoded
@@ -235,6 +350,13 @@ static const char *g_sel[MAX_SEL]; /* selected swimmer ids (heap copies)    */
 static int         g_nsel    = 0;  /* number of entries in |g_sel|          */
 static char g_events[NUM_EVENTS][32]; /* event codes requested via \.{-e}  */
 static int  g_nevents = 0;  /* number of entries in |g_events|             */
+static const char *g_member_id = NULL; /* ad-hoc |memberId| from \.{-m}   */
+static int  g_auth_blocked = 0;  /* set when the hub answered 401 or 403  */
+static int  g_not_found = 0;     /* last lookup concluded "no such swimmer" */
+static int  g_missing   = 0;     /* swimmers skipped for that reason        */
+static const char *g_cur_member = NULL; /* memberId of the swimmer in hand */
+static char g_cur_lsc[16]   = "";  /* her LSC code, when the lookup gave one */
+static char g_cur_club[128] = "";  /* her club name, likewise               */
 
 @* Data structures.
 
@@ -267,10 +389,14 @@ typedef struct {
 @ A |Swimmer| record holds the per-swimmer search parameters: a query
 string sent to the person-search API, a lower-case substring used to
 identify the correct row, a flag bit used to filter output, and an
-optional age window expressed as ISO~\.{YYYY-MM-DD} dates.  The
-typedef lives in this section (rather than next to the |SWIMMERS|
-array in main) so that |offline_fetch| can reference it without a
-forward declaration.
+optional age window expressed as ISO~\.{YYYY-MM-DD} dates.  A sixth
+field, |member_id|, short-circuits the whole search when the swimmer's
+data-hub identifier is already known --- which matters now that
+\.{GetMembersForFilters} is closed to anonymous callers while
+\.{GetMember/<id>} remains open.  A |NULL| |member_id| means ``look her
+up by name''.  The typedef lives in this section (rather than next to
+the |SWIMMERS| array in main) so that |offline_fetch| and
+|lookup_member_id| can reference it without a forward declaration.
 
 @<Type definitions@>+=
 typedef struct {
@@ -279,6 +405,7 @@ typedef struct {
     const char *match_substr;  /* Lower-case substring to match         */
     const char *date_min;      /* NULL or "YYYY-MM-DD" inclusive lower  */
     const char *date_max;      /* NULL or "YYYY-MM-DD" inclusive upper  */
+    const char *member_id;     /* known memberId, or NULL to search for */
 } Swimmer;
 
 @* HTTP utilities.
@@ -330,18 +457,226 @@ static void base64(const char *in, char *out, size_t out_sz)
     out[o] = '\0';
 }
 
+@ {\bf SHA-256 and HMAC.}  A signed-in caller must present a
+\.{rate-key} header, which the data-hub front end computes as
+$$\hbox{\.{floor(t/s)} \.{"."} \.{HMAC-SHA256}$_{\rm sid}$\.{(t)}}$$
+where $t$ is the current Unix time in milliseconds divided by $10^4$
+(a ten-second bucket) and $s$ is the number of seconds elapsed since
+midnight UTC.  Rather than take on a TLS-library dependency for one
+hash, the two primitives are implemented here in about sixty lines of
+portable C.  \.{FIPS 180-4} defines SHA-256 and \.{RFC 2104} defines
+HMAC; the test suite checks both against the published vectors.
+
+@ The SHA-256 state: eight chaining words, the total message length in
+bytes, and a 64-byte block accumulator.
+
+@<HTTP utilities@>+=
+typedef struct {
+    uint32_t h[8];          /* chaining variables                */
+    uint64_t len;           /* total bytes absorbed              */
+    unsigned char buf[64];  /* partial block                     */
+    size_t   n;             /* bytes currently held in |buf|     */
+} Sha256;
+
+@ The sixty-four round constants: the first thirty-two bits of the
+fractional parts of the cube roots of the first sixty-four primes.
+
+@<HTTP utilities@>+=
+static const uint32_t K256[64] = {
+0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,
+0x923f82a4u,0xab1c5ed5u,0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,
+0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,0xe49b69c1u,0xefbe4786u,
+0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
+0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,
+0x06ca6351u,0x14292967u,0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,
+0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,0xa2bfe8a1u,0xa81a664bu,
+0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
+0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,
+0x5b9cca4fu,0x682e6ff3u,0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,
+0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u};
+
+@ The four logical functions of the compression loop, written out as
+inline helpers so no preprocessor macros leak into the woven listing.
+|ror| is a 32-bit right rotation.
+
+@<HTTP utilities@>+=
+static uint32_t ror(uint32_t x, int n)
+{
+    return (x >> n) | (x << (32 - n));
+}
+
+static uint32_t ep0(uint32_t x) { return ror(x,2)  ^ ror(x,13) ^ ror(x,22); }
+static uint32_t ep1(uint32_t x) { return ror(x,6)  ^ ror(x,11) ^ ror(x,25); }
+static uint32_t sg0(uint32_t x) { return ror(x,7)  ^ ror(x,18) ^ (x >> 3);  }
+static uint32_t sg1(uint32_t x) { return ror(x,17) ^ ror(x,19) ^ (x >> 10); }
+
+@ |sha256_block| compresses one 64-byte block into the chaining state:
+the message schedule is expanded to sixty-four words and the
+eight working variables are stirred through sixty-four rounds.
+
+@<HTTP utilities@>+=
+static void sha256_block(Sha256 *s, const unsigned char *p)
+{
+    uint32_t w[64], a, b, c, d, e, f, g, h, t1, t2;
+    for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)p[i*4]   << 24 | (uint32_t)p[i*4+1] << 16 |
+               (uint32_t)p[i*4+2] <<  8 | (uint32_t)p[i*4+3];
+    for (int i = 16; i < 64; i++)
+        w[i] = w[i-16] + sg0(w[i-15]) + w[i-7] + sg1(w[i-2]);
+    a = s->h[0]; b = s->h[1]; c = s->h[2]; d = s->h[3];
+    e = s->h[4]; f = s->h[5]; g = s->h[6]; h = s->h[7];
+    for (int i = 0; i < 64; i++) {
+        t1 = h + ep1(e) + ((e & f) ^ (~e & g)) + K256[i] + w[i];
+        t2 = ep0(a) + ((a & b) ^ (a & c) ^ (b & c));
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+    s->h[0] += a; s->h[1] += b; s->h[2] += c; s->h[3] += d;
+    s->h[4] += e; s->h[5] += f; s->h[6] += g; s->h[7] += h;
+}
+
+@ |sha256_init| loads the standard initialisation vector --- the first
+thirty-two bits of the fractional parts of the square roots of the
+first eight primes.
+
+@<HTTP utilities@>+=
+static void sha256_init(Sha256 *s)
+{
+    static const uint32_t IV[8] = {
+        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u };
+    memcpy(s->h, IV, sizeof IV);
+    s->len = 0;
+    s->n   = 0;
+}
+
+@ |sha256_update| absorbs |n| bytes, compressing whenever the 64-byte
+accumulator fills.  Byte-at-a-time absorption is ample here: the
+longest message the program hashes is a ten-digit bucket number.
+
+@<HTTP utilities@>+=
+static void sha256_update(Sha256 *s, const void *data, size_t n)
+{
+    const unsigned char *p = (const unsigned char *)data;
+    s->len += n;
+    while (n--) {
+        s->buf[s->n++] = *p++;
+        if (s->n == 64) { sha256_block(s, s->buf); s->n = 0; }
+    }
+}
+
+@ |sha256_final| applies the \.{FIPS 180-4} padding --- a \.{0x80}
+byte, zeros up to offset~56, then the 64-bit big-endian bit count ---
+and serialises the chaining state.  The bit count is captured
+{\it before\/} padding, since padding itself goes through
+|sha256_update| and so advances |s->len|.
+
+@<HTTP utilities@>+=
+static void sha256_final(Sha256 *s, unsigned char out[32])
+{
+    uint64_t bits = s->len * 8;
+    sha256_update(s, "\x80", 1);
+    while (s->n != 56) sha256_update(s, "", 1);
+    for (int i = 7; i >= 0; i--)
+        s->buf[s->n++] = (unsigned char)(bits >> (i * 8));
+    sha256_block(s, s->buf);
+    s->n = 0;
+    for (int i = 0; i < 8; i++) {
+        out[i*4]   = (unsigned char)(s->h[i] >> 24);
+        out[i*4+1] = (unsigned char)(s->h[i] >> 16);
+        out[i*4+2] = (unsigned char)(s->h[i] >>  8);
+        out[i*4+3] = (unsigned char)(s->h[i]);
+    }
+}
+
+@ |hmac_sha256| is \.{RFC 2104} verbatim: a key longer than the block
+size is hashed down to thirty-two bytes, then padded to sixty-four;
+the inner digest of \.{key} $\oplus$ \.{0x36} concatenated with the
+message is re-hashed under \.{key} $\oplus$ \.{0x5c}.  The result is
+written to |hex| as sixty-four lower-case hexadecimal digits plus a
+terminator, so |hex| must hold at least sixty-five bytes.
+
+@<HTTP utilities@>+=
+static void hmac_sha256(const char *key, const char *msg, char *hex)
+{
+    unsigned char k[64], ip[64], op[64], ih[32], oh[32];
+    size_t kl = strlen(key);
+    Sha256 s;
+    memset(k, 0, sizeof k);
+    if (kl > 64) { sha256_init(&s); sha256_update(&s, key, kl);
+                   sha256_final(&s, k); }
+    else memcpy(k, key, kl);
+    for (int i = 0; i < 64; i++) { ip[i] = k[i] ^ 0x36; op[i] = k[i] ^ 0x5c; }
+    sha256_init(&s); sha256_update(&s, ip, 64);
+    sha256_update(&s, msg, strlen(msg)); sha256_final(&s, ih);
+    sha256_init(&s); sha256_update(&s, op, 64);
+    sha256_update(&s, ih, 32);           sha256_final(&s, oh);
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", oh[i]);
+}
+
+@* Data-hub credentials.
+
+@ |usas_sub_id| and |usas_session_id| read the caller's identity from
+the environment.  With |USAS_SUB_ID| unset the program presents itself
+as \.{Anonymous}, exactly as the front end does for a visitor who has
+not signed in --- which is enough for the reference feeds and for
+\.{GetMember}, and is refused with \.{403} by everything else.
+
+@<HTTP utilities@>+=
+static const char *usas_sub_id(void)
+{
+    const char *e = getenv("USAS_SUB_ID");
+    return (e && *e) ? e : "Anonymous";
+}
+
+static const char *usas_session_id(void)
+{
+    const char *e = getenv("USAS_SESSION_ID");
+    return (e && *e) ? e : NULL;
+}
+
+@ |build_rate_key| reproduces the front end's throttling token:
+the ten-second epoch bucket $t$, divided by the number of seconds
+elapsed since midnight~UTC, then a dot, then the HMAC-SHA256 of the
+decimal spelling of $t$ under the session id.  |gmtime_r| supplies
+the UTC wall clock; a zero seconds-since-midnight (the first second of
+the day) is forced to one to avoid a division by zero, matching the
+front end's own zero guard.
+
+@<HTTP utilities@>+=
+static void build_rate_key(const char *sid, char *out, size_t n)
+{
+    time_t now = time(NULL);
+    long long t = (long long)now * 1000 / 10000;
+    struct tm g;
+    gmtime_r(&now, &g);
+    long long secs = g.tm_hour * 3600 + g.tm_min * 60 + g.tm_sec;
+    if (secs == 0) secs = 1;
+    char tbuf[32], hex[65];
+    snprintf(tbuf, sizeof tbuf, "%lld", t);
+    hmac_sha256(sid, tbuf, hex);
+    snprintf(out, n, "%lld.%s", t / secs, hex);
+}
+
 @ |device_id| returns the cached |Device-Id| value the times service
 requires, building it once on first use.  We reproduce the shape the
 data hub's front-end produces: base64 of \.{"platform - vendor -
 fingerprint - millis"}, then the first five characters repeated after
-the fifteenth.  The server validates only the format, so a per-run
-fingerprint (process id plus clock) is sufficient.
+the fifteenth.  The server validates this shape and answers \.{400
+Invalid Device-Id format in request headers} when it does not hold, so
+the duplication is load-bearing, not decoration.  A per-run fingerprint
+(process id plus clock) satisfies the rest; |USAS_DEVICE_ID| overrides
+the whole computation for a caller who wants to pin one value across
+runs.
 
 @<HTTP utilities@>+=
 static const char *device_id(void)
 {
     static char id[512];
+    const char *env = getenv("USAS_DEVICE_ID");
     if (id[0]) return id;
+    if (env && *env) { snprintf(id, sizeof id, "%s", env); return id; }
     char raw[128], n[256];
     long now = (long)time(NULL);
     snprintf(raw, sizeof raw, "Linux - curlswim - %lx%lx - %ld000",
@@ -351,53 +686,187 @@ static const char *device_id(void)
     return id;
 }
 
+@* HTTP transport.
+
+@ {\bf The defect this replaces.}  The original |http_request| returned
+|buf.data| directly and reported failure by returning |NULL|.  That
+conflated two entirely different outcomes, because |buf.data| is left
+|NULL| whenever the write callback never fires --- which is exactly what
+happens on {\it any\/} response with an empty body.  The data hub
+answers a refused request with \.{403 Forbidden} and
+\.{content-length: 0}, so a policy rejection was indistinguishable from
+a DNS or TLS failure, and the caller printed
+\.{"person lookup request failed"} either way.  The status code, the one
+piece of information that would have explained the problem, was never
+read at all.
+
+The rewrite below fixes that.  The HTTP status is retrieved with
+|curl_easy_getinfo| and returned through |*status|; a successful
+transport that produced no body yields an empty string rather than
+|NULL|; and |NULL| now means one thing only --- the request never
+completed.  The rewrite also sets connect and total timeouts (an
+unreachable host used to be able to hang a run indefinitely), follows
+redirects, negotiates compression, and sends a truthful |User-Agent|.
+
 @ |http_request| performs one request --- a |GET| when |body| is |NULL|,
-otherwise a |POST| carrying |body| --- and returns the response as a
-null-terminated heap string, or |NULL| on failure.  The caller frees the
-result.  Every request carries the anonymous data-hub headers instead of
-a bearer token.
+otherwise a |POST| carrying |body|.  It returns the response body as a
+null-terminated heap string (possibly empty) and stores the HTTP status
+in |*status|, or returns |NULL| when the request could not be completed
+at all, in which case |*status| is zero.  The caller frees the result.
 
 @<HTTP utilities@>+=
-static char *http_request(const char *url, const char *body)
+static char *http_request(const char *url, const char *body, long *status)
 {
     @<Initialize curl handle@>
     @<Issue HTTP request and return@>
 }
 
-@ The easy handle is created, the anonymous auth headers are assembled,
-and all curl options are configured before the request is issued.
+@ The easy handle is created, the data-hub headers are assembled, and
+all curl options are configured before the request is issued.
 
 @<Initialize curl handle@>=
 CURL *curl = curl_easy_init();
+if (status) *status = 0;
 if (!curl) return NULL;
 
 Buffer buf = {NULL, 0};
-
-char dev_hdr[560];
-snprintf(dev_hdr, sizeof dev_hdr, "Device-Id: %s", device_id());
-
 struct curl_slist *hdrs = NULL;
+@<Build request headers@>
+
+curl_easy_setopt(curl, CURLOPT_URL,             url);
+curl_easy_setopt(curl, CURLOPT_HTTPHEADER,      hdrs);
+if (body) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,   write_cb);
+curl_easy_setopt(curl, CURLOPT_WRITEDATA,       &buf);
+curl_easy_setopt(curl, CURLOPT_USERAGENT,       HTTP_USER_AGENT);
+curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION,  1L);
+curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+curl_easy_setopt(curl, CURLOPT_TIMEOUT,        (long)HTTP_TIMEOUT_SECS);
+curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, (long)HTTP_CONNECT_SECS);
+
+@ Every request carries \.{AppName}, \.{Device-Id}, and \.{Usas-Sub-Id};
+the \.{Origin} and \.{Referer} pair identifies the data hub front end,
+which the edge WAF expects.  A caller who exported |USAS_SESSION_ID|
+additionally gets \.{Usas-Session-Id} and a freshly computed
+\.{rate-key}.  The header buffers are declared in this scope because
+\.{libcurl} does not copy the strings appended to an \.{slist} until the
+transfer runs.
+
+There is deliberately no \.{Accept} header.  The service's content
+negotiation treats \.{Accept: application/json} as a request to
+serialise its already-serialised payload a second time, returning the
+whole document as one JSON {\it string\/} with every inner quote
+escaped --- which the scanner, looking for \.{"fullName"} and finding
+\.{\\"fullName\\"}, cannot read.  Omitting \.{Accept} yields the plain
+object.  The front end omits it too; the safe rule when talking to this
+service is to send exactly the headers its own client sends, and
+nothing more.
+
+@<Build request headers@>=
+char dev_hdr[600], sub_hdr[160], sid_hdr[160], rk_hdr[224];
+snprintf(dev_hdr, sizeof dev_hdr, "Device-Id: %s",   device_id());
+snprintf(sub_hdr, sizeof sub_hdr, "Usas-Sub-Id: %s", usas_sub_id());
 hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
 hdrs = curl_slist_append(hdrs, "AppName: DataHub");
-hdrs = curl_slist_append(hdrs, "Usas-Sub-Id: Anonymous");
+hdrs = curl_slist_append(hdrs, "Origin: https://data.usaswimming.org");
+hdrs = curl_slist_append(hdrs, "Referer: https://data.usaswimming.org/");
+hdrs = curl_slist_append(hdrs, sub_hdr);
 hdrs = curl_slist_append(hdrs, dev_hdr);
+const char *sid = usas_session_id();
+if (sid) {
+    char rk[128];
+    build_rate_key(sid, rk, sizeof rk);
+    snprintf(sid_hdr, sizeof sid_hdr, "Usas-Session-Id: %s", sid);
+    snprintf(rk_hdr,  sizeof rk_hdr,  "rate-key: %s", rk);
+    hdrs = curl_slist_append(hdrs, sid_hdr);
+    hdrs = curl_slist_append(hdrs, rk_hdr);
+}
 
-curl_easy_setopt(curl, CURLOPT_URL,           url);
-curl_easy_setopt(curl, CURLOPT_HTTPHEADER,    hdrs);
-if (body) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &buf);
-
-@ The request is executed; on success the accumulated buffer is returned
-to the caller; on failure the partial buffer is freed and |NULL| is returned.
+@ The request is executed.  A transport failure is reported here, once,
+with libcurl's own description of it; an HTTP-level failure is left for
+the caller to interpret, since only the caller knows what it was asking
+for.  An empty body is normalised to |""| so that |NULL| unambiguously
+means ``no response at all''.
 
 @<Issue HTTP request and return@>=
 CURLcode rc = curl_easy_perform(curl);
+long code = 0;
+curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
 curl_slist_free_all(hdrs);
 curl_easy_cleanup(curl);
 
-if (rc != CURLE_OK) { free(buf.data); return NULL; }
+if (rc != CURLE_OK) {
+    fprintf(stderr, "Error: cannot reach %s: %s\n",
+            url, curl_easy_strerror(rc));
+    free(buf.data);
+    return NULL;
+}
+if (status) *status = code;
+if (!buf.data) buf.data = calloc(1, 1);
 return buf.data;
+
+@ |http_status_text| names the handful of status codes this service
+actually returns, so a diagnostic reads \.{HTTP 403 Forbidden} rather
+than a bare number.
+
+@<HTTP utilities@>+=
+static const char *http_status_text(long s)
+{
+    switch (s) {
+    case 200: return "OK";
+    case 204: return "No Content";
+    case 400: return "Bad Request";
+    case 401: return "Unauthorized";
+    case 403: return "Forbidden";
+    case 404: return "Not Found";
+    case 429: return "Too Many Requests";
+    case 500: return "Internal Server Error";
+    case 502: return "Bad Gateway";
+    case 503: return "Service Unavailable";
+    default:  return "";
+    }
+}
+
+@ |report_http_error| prints one line naming the operation, the status,
+and the URL.  The first \.{401} or \.{403} of a run additionally draws
+the sign-in advice; repeating it for each of the thirty-one events of
+each of twenty-nine swimmers would bury the information it is trying to
+convey.  |g_auth_blocked| records that the run was refused for want of
+credentials so |main| can exit with |RC_NOPERM| rather than a generic
+failure.
+
+@<HTTP utilities@>+=
+static void report_http_error(const char *what, const char *url, long status)
+{
+    static int advised = 0;
+    fprintf(stderr, "Error: %s failed --- HTTP %ld %s\n       %s\n",
+            what, status, http_status_text(status), url);
+    if (status != 401 && status != 403) return;
+    g_auth_blocked = 1;
+    if (advised) return;
+    advised = 1;
+    @<Print authentication advice@>
+}
+
+@ The advice is written once per run, to standard error, and names both
+ways forward: supply credentials, or fall back to the local mirror.
+
+@<Print authentication advice@>=
+fputs(
+"\n"
+"  The USA Swimming Data Hub declined this request.  The program\n"
+"  did sign in, so the likely causes are, in order:\n"
+"\n"
+"    1. The password in the credentials file is stale --- the\n"
+"       sign-in step would have reported that, so check above.\n"
+"    2. The session was not activated.  Every run activates it via\n"
+"       the security service; a 401 here means that call did not\n"
+"       take effect.  Re-run; if it persists, run  -o diag.\n"
+"    3. This account lacks permission for the endpoint (403).\n"
+"\n"
+"  Meanwhile  -o offline  reads times already mirrored in the local\n"
+"  Postgres swim-times database, with no network at all.\n"
+"\n", stderr);
 
 @* JSON scanner.
 
@@ -443,52 +912,529 @@ by the scanner: every value the program consumes --- meet name, event
 code, date, time, and standard --- arrives as a JSON string, so a single
 string extractor suffices.
 
+@* Sign-in.
+
+The program signs in to the USA~Swimming data hub before it fetches
+anything.  This is not an option: since the hub withdrew anonymous
+access to its search and times endpoints there is no other way to
+retrieve a swim time, and a program that quietly fell back to an
+anonymous request would only be choosing a slower route to the same
+\.{403}.
+
+Credentials come from a file --- \.{\$USAS\_ENV\_FILE}, or
+\.{\$HOME/.usas-env} --- holding shell-style assignments:
+$$\vbox{\halign{\.{#}\hfil\cr
+export USAS\_USER="..."\cr
+export USAS\_PASS="..."\cr
+export SWIM\_TIMES\_PGCONNINFO="..."\cr}}$$
+
+\noindent The file is read, never executed, and {\it only names
+beginning \.{USAS\_} are honoured}.  Two reasons.  The narrow one is
+hygiene: a credentials file should not be able to reach into the rest
+of the environment.  The pointed one is that such a file may well carry
+settings meant for {\it other\/} programs --- the one this was written
+against also defines \.{SWIM\_TIMES\_PGCONNINFO}, pointing at a
+differently-shaped database --- and silently adopting them would
+retarget this program's mirror without anyone asking for it.  A
+deliberate override still works, because a value already present in the
+environment always wins over the file.
+
+@ {\bf The sequence.}  Signing in takes six requests and one
+non-obvious seventh step.
+
+\medskip
+\item{1.} \.{GET bff/login} --- the data hub's back-end-for-front-end
+  starts an OpenID~Connect authorization-code flow with PKCE and
+  redirects, eventually, to the identity provider's password form.  We
+  follow the redirects and keep the page.
+\item{2.} \.{POST login.usaswimming.org/Login} --- the form is
+  resubmitted with the username, the password, the \.{ReturnUrl} it
+  carried, and its antiforgery token.  A successful sign-in answers
+  \.{302}; a failed one answers \.{200} and re-renders the form, so the
+  status alone tells us which happened.
+\item{3.} \.{GET} the authorization callback named by that redirect.
+  Because the client registered \.{response\_mode=form\_post}, the
+  reply is not another redirect but an HTML page whose body is a form
+  that a browser would submit by script.
+\item{4.} \.{POST} that form's four fields --- \.{code}, \.{state},
+  \.{session\_state}, \.{iss} --- to \.{bff/signin-oidc}, which
+  exchanges the code and sets the session cookie.
+\item{5.} \.{GET bff/userinfo} --- returns the claims, of which we
+  need two: \.{sub}, the subject, and \.{sid}, the session id.
+\item{6.} \.{POST security/auth/GetDataHubSecurityInfoForIdp} with
+  those two.
+\medskip
+
+\noindent Step~6 looks like a permissions query, and it is one --- it
+returns the caller's name and the list of routes they may use.  But it
+is also what {\it activates\/} the session for the times API.  A
+session that has completed steps 1--5 and skipped step~6 is answered
+\.{401 Unauthorized} by every protected times endpoint; the same
+session, after step~6, is answered \.{200}.  This was established by
+running the two orders against a fresh session repeatedly.  The data
+hub's own front end issues the call on start-up, so the coupling is
+invisible from the browser --- and it is the single most surprising
+thing in this program.
+
+@ The sign-in machinery is assembled from six chunks.
+
+@<Sign-in machinery@>=
+@<Credentials file loader@>
+@<HTML field scanner@>
+@<Sign-in transport@>
+@<Perform the OIDC sign-in@>
+@<Activate the session@>
+@<Ensure a signed-in session@>
+
+@ |load_env_file| reads the credentials file a line at a time.  A line
+may begin with \.{export}; the value may be bare, single-quoted, or
+double-quoted; anything after a \.{\#} at the start of a line is a
+comment.  Nothing is executed and no shell is spawned.
+
+@<Credentials file loader@>=
+static void load_env_file(void)
+{
+    char path[512];
+    const char *p = getenv("USAS_ENV_FILE");
+    if (p && *p) snprintf(path, sizeof path, "%s", p);
+    else {
+        const char *h = getenv("HOME");
+        if (!h) return;
+        snprintf(path, sizeof path, "%s%s", h, ENV_FILE_DEFAULT);
+    }
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[2048];
+    while (fgets(line, sizeof line, f)) @<Apply one assignment@>
+    fclose(f);
+}
+
+@ One line is split at the first \.{=}, the value is unquoted in place,
+and the pair is published with |setenv|'s no-overwrite flag so that an
+explicit environment setting always wins.  Only the \.{USAS\_} prefix
+is honoured.
+
+@<Apply one assignment@>=
+{
+    char *s = line;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '#' || *s == '\n' || !*s) continue;
+    if (strncmp(s, "export ", 7) == 0) s += 7;
+    char *eq = strchr(s, '=');
+    if (!eq) continue;
+    *eq = '\0';
+    char *val = eq + 1;
+    size_t vl = strlen(val);
+    while (vl && (val[vl-1] == '\n' || val[vl-1] == '\r')) val[--vl] = '\0';
+    if (vl >= 2 && (*val == '"' || *val == '\'') && val[vl-1] == *val) {
+        val[vl-1] = '\0';
+        val++;
+    }
+    if (strncmp(s, "USAS_", 5) == 0)
+        setenv(s, val, 0);
+}
+
+@ |html_unescape| resolves, in place, the handful of entities the two
+forms actually contain.  A \.{ReturnUrl} arrives with its query
+separators written \.{\&amp;}, and leaving them that way produces a
+\.{ReturnUrl} the identity provider rejects.
+
+@<HTML field scanner@>=
+static void html_unescape(char *s)
+{
+    static const char *ENT[] = { "&amp;", "&lt;", "&gt;", "&quot;",
+                                 "&#x27;", "&#39;", "&#x2F;", "&#47;" };
+    static const char  REP[] = { '&', '<', '>', '"', '\'', '\'', '/', '/' };
+    char *r = s, *w = s;
+    while (*r) {
+        size_t i = 0, n = sizeof REP;
+        for (; i < n; i++) {
+            size_t el = strlen(ENT[i]);
+            if (strncmp(r, ENT[i], el) == 0) { *w++ = REP[i]; r += el; break; }
+        }
+        if (i == n) *w++ = *r++;
+    }
+    *w = '\0';
+}
+
+@ |scan_field| finds the hidden input named |field| and copies its
+\.{value} attribute.  The two pages quote their attributes differently
+--- the identity provider's form uses double quotes, the
+authorization callback's uses single --- so both spellings of the name
+are tried and whichever quote character opens the value closes it.
+
+@<HTML field scanner@>=
+static int scan_field(const char *hay, const char *field,
+                      char *out, size_t max_len)
+{
+    char n1[96], n2[96];
+    snprintf(n1, sizeof n1, "name=\"%s\"", field);
+    snprintf(n2, sizeof n2, "name='%s'",  field);
+    const char *p = strstr(hay, n1);
+    if (!p) p = strstr(hay, n2);
+    if (!p) return 0;
+    const char *q = strstr(p, "value=");
+    if (!q) return 0;
+    q += 6;
+    char quote = *q++;
+    if (quote != '"' && quote != '\'') return 0;
+    const char *e = strchr(q, quote);
+    if (!e) return 0;
+    size_t len = (size_t)(e - q);
+    if (len >= max_len) return 0;
+    memcpy(out, q, len);
+    out[len] = '\0';
+    html_unescape(out);
+    return 1;
+}
+
+@ |auth_fetch| performs one step of the sign-in on a handle whose
+cookie store persists across the whole sequence.  With |follow| zero it
+stops at a redirect and reports the \.{Location} in |redir|, which is
+how steps~2 and~3 obtain the next URL.  The returned body is a heap
+string the caller frees; |NULL| means the request did not complete.
+
+@<Sign-in transport@>=
+static char *auth_fetch(CURL *curl, const char *url, const char *post,
+                        int follow, char *redir, size_t rsz, long *status)
+{
+    Buffer buf = {NULL, 0};
+    struct curl_slist *hdrs = NULL;
+    @<Configure the sign-in request@>
+    CURLcode rc = curl_easy_perform(curl);
+    @<Collect the sign-in response@>
+}
+
+@ The form encoding is the one both ASP.NET endpoints expect.  Setting
+\.{CURLOPT\_HTTPGET} explicitly when there is no body matters because
+the handle is reused: without it the previous step's \.{POST} would
+persist.
+
+@<Configure the sign-in request@>=
+if (post) hdrs = curl_slist_append(hdrs,
+    "Content-Type: application/x-www-form-urlencoded");
+curl_easy_setopt(curl, CURLOPT_URL,             url);
+curl_easy_setopt(curl, CURLOPT_HTTPHEADER,      hdrs);
+if (post) { curl_easy_setopt(curl, CURLOPT_POST, 1L);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post); }
+else        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION,  (long)follow);
+curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,   write_cb);
+curl_easy_setopt(curl, CURLOPT_WRITEDATA,       &buf);
+curl_easy_setopt(curl, CURLOPT_USERAGENT,       HTTP_USER_AGENT);
+curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+curl_easy_setopt(curl, CURLOPT_COOKIEFILE,      "");
+curl_easy_setopt(curl, CURLOPT_TIMEOUT,        (long)HTTP_TIMEOUT_SECS);
+curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, (long)HTTP_CONNECT_SECS);
+
+@ The status and, when the request stopped at one, the redirect target
+are read back before the header list is released.
+
+@<Collect the sign-in response@>=
+long code = 0;
+char *loc = NULL;
+curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &loc);
+if (redir && rsz) snprintf(redir, rsz, "%s", loc ? loc : "");
+curl_slist_free_all(hdrs);
+if (status) *status = code;
+if (rc != CURLE_OK) {
+    fprintf(stderr, "Error: sign-in step failed at %s: %s\n",
+            url, curl_easy_strerror(rc));
+    free(buf.data);
+    return NULL;
+}
+if (!buf.data) buf.data = calloc(1, 1);
+return buf.data;
+
+@ |form_add| appends one percent-encoded \.{key=value} pair to a form
+body, inserting the separator when the body is not empty.
+
+@<Sign-in transport@>+=
+static void form_add(CURL *curl, char *buf, size_t n,
+                     const char *key, const char *val)
+{
+    char *e = curl_easy_escape(curl, val ? val : "", 0);
+    size_t len = strlen(buf);
+    snprintf(buf + len, n - len, "%s%s=%s", len ? "&" : "", key,
+             e ? e : "");
+    if (e) curl_free(e);
+}
+
+@ |oidc_login| walks the six steps.  On success it publishes
+|USAS_SUB_ID| and |USAS_SESSION_ID| into the environment, from where
+|http_request| picks them up for every later call, and returns~1.
+
+@<Perform the OIDC sign-in@>=
+static int oidc_login(const char *user, const char *pass)
+{
+    CURL *curl = curl_easy_init();
+    if (!curl) return 0;
+    int ok = 0;
+    char *body = malloc(16384);
+    char *form = malloc(16384);
+    if (body && form) @<Walk the sign-in steps@>
+    free(body); free(form);
+    curl_easy_cleanup(curl);
+    return ok;
+}
+
+@ The steps in order.  Each failure is reported by the chunk that
+detects it, so a sign-in that goes wrong says {\it where\/} it went
+wrong rather than simply refusing to start.
+
+@<Walk the sign-in steps@>=
+{
+    char url[4096], ret[4096], tok[1024];
+    long st = 0;
+    @<Fetch the sign-in form@>
+    @<Submit the credentials@>
+    @<Follow the authorization callback@>
+    @<Post the authorization code@>
+    @<Read the session identity@>
+}
+
+@ Step~1.  The redirects are followed to the identity provider's login
+page, from which the \.{ReturnUrl} and the antiforgery token are
+lifted.
+
+@<Fetch the sign-in form@>=
+char *page = auth_fetch(curl, BFF_LOGIN, NULL, 1, NULL, 0, &st);
+if (!page) goto done;
+if (!scan_field(page, "ReturnUrl", ret, sizeof ret) ||
+    !scan_field(page, "__RequestVerificationToken", tok, sizeof tok)) {
+    fputs("Error: sign-in page did not contain the expected form\n",
+          stderr);
+    free(page); goto done;
+}
+free(page);
+
+@ Step~2.  A \.{302} means the password was accepted; a \.{200} means
+the form came back with a validation message, which for this endpoint
+means the credentials were rejected.  The two cases get different
+messages, because ``HTTP 200'' is a peculiarly unhelpful way to be told
+that a password is wrong.
+
+@<Submit the credentials@>=
+form[0] = '\0';
+form_add(curl, form, 16384, "ReturnUrl", ret);
+form_add(curl, form, 16384, "Username",  user);
+form_add(curl, form, 16384, "Password",  pass);
+form_add(curl, form, 16384, "loginButton", "login");
+form_add(curl, form, 16384, "__RequestVerificationToken", tok);
+page = auth_fetch(curl, IDP_LOGIN, form, 0, url, sizeof url, &st);
+if (!page) goto done;
+free(page);
+if (st != 302 || !url[0]) {
+    if (st == 200)
+        fprintf(stderr, "Error: USA Swimming rejected the credentials"
+                " for user \"%s\".\n       Check USAS_USER and"
+                " USAS_PASS.\n", user);
+    else
+        fprintf(stderr, "Error: sign-in failed for user \"%s\""
+                " (HTTP %ld %s)\n", user, st, http_status_text(st));
+    goto done;
+}
+
+@ Step~3.  The authorization callback answers with the
+\.{response\_mode=form\_post} page.  Its four hidden fields are the
+authorization code and the values that bind it to this flow.
+
+@<Follow the authorization callback@>=
+page = auth_fetch(curl, url, NULL, 0, NULL, 0, &st);
+if (!page) goto done;
+char code[1024], state[4096], sess[512], iss[256];
+int got = scan_field(page, "code",  code,  sizeof code)  &&
+          scan_field(page, "state", state, sizeof state) &&
+          scan_field(page, "iss",   iss,   sizeof iss);
+if (!scan_field(page, "session_state", sess, sizeof sess)) sess[0] = '\0';
+free(page);
+if (!got) {
+    fputs("Error: authorization callback returned no code\n", stderr);
+    goto done;
+}
+
+@ Step~4.  Posting the code to the back-end completes the exchange and
+sets the session cookie.  The reply is a redirect to the application
+root, which we do not need to follow.
+
+@<Post the authorization code@>=
+form[0] = '\0';
+form_add(curl, form, 16384, "code",          code);
+form_add(curl, form, 16384, "state",         state);
+form_add(curl, form, 16384, "session_state", sess);
+form_add(curl, form, 16384, "iss",           iss);
+page = auth_fetch(curl, BFF_SIGNIN, form, 0, NULL, 0, &st);
+if (!page) goto done;
+free(page);
+if (st != 302 && st != 200) {
+    fprintf(stderr, "Error: code exchange failed (HTTP %ld)\n", st);
+    goto done;
+}
+
+@ Step~5.  The claims come back as JSON; |sub| and |sid| are all we
+need, and they become the two headers every later request carries.
+
+@<Read the session identity@>=
+page = auth_fetch(curl, BFF_USERINFO, NULL, 0, NULL, 0, &st);
+if (!page) goto done;
+char sub[256], sid[256];
+const char *q = page;
+if (st == 200 && scan_string("sub", &q, sub, sizeof sub)) {
+    q = page;
+    if (scan_string("sid", &q, sid, sizeof sid)) {
+        setenv("USAS_SUB_ID", sub, 1);
+        setenv("USAS_SESSION_ID", sid, 1);
+        ok = 1;
+    }
+}
+free(page);
+if (!ok) fprintf(stderr, "Error: userinfo returned no session"
+                 " (HTTP %ld)\n", st);
+done:
+(void)0;
+
+@ |activate_session| performs the seventh step.  It is an ordinary
+data-hub request --- by now |http_request| is sending the new
+\.{Usas-Sub-Id} and \.{Usas-Session-Id} --- and its reply carries the
+signed-in user's given name, which is worth showing so the operator can
+see {\it whose\/} account is in use.  Without this call every protected
+times endpoint answers \.{401}.
+
+@<Activate the session@>=
+static int activate_session(char *who, size_t who_sz)
+{
+    char json[600];
+    long st = 0;
+    snprintf(json, sizeof json, "{\"sub\":\"%s\",\"sid\":\"%s\"}",
+             getenv("USAS_SUB_ID"), getenv("USAS_SESSION_ID"));
+    char *r = http_request(SECURITY_INFO, json, &st);
+    if (!r) return 0;
+    if (st != 200) {
+        report_http_error("session activation", SECURITY_INFO, st);
+        free(r); return 0;
+    }
+    const char *p = r;
+    if (who && who_sz && !scan_string("firstName", &p, who, who_sz))
+        snprintf(who, who_sz, "(unknown)");
+    free(r);
+    return 1;
+}
+
+@ |ensure_session| is the entry point |main| calls before any fetch.
+A session supplied in the environment is used as it stands --- but it
+is still activated, since an unactivated session is indistinguishable
+from an invalid one until a times query fails.  Otherwise the
+credentials file supplies a user name and password and the full
+sign-in runs.
+
+@<Ensure a signed-in session@>=
+static int ensure_session(int quiet)
+{
+    char who[128] = "";
+    load_env_file();
+    const char *sub = getenv("USAS_SUB_ID");
+    const char *sid = getenv("USAS_SESSION_ID");
+    if (!(sub && *sub && sid && *sid)) {
+        @<Sign in with the stored credentials@>
+    }
+    if (!activate_session(who, sizeof who)) {
+        fputs("Error: the data hub did not accept this session\n", stderr);
+        return 0;
+    }
+    if (!quiet) printf("Signed in as %s.\n\n", who);
+    return 1;
+}
+
+@ The credentials file must supply both a user name and a password.  If
+it does not, say so precisely: a missing file and a file missing one
+field are different mistakes with different remedies.
+
+@<Sign in with the stored credentials@>=
+const char *user = getenv("USAS_USER");
+const char *pass = getenv("USAS_PASS");
+if (!user || !*user || !pass || !*pass) {
+    @<Report missing credentials@>
+    return 0;
+}
+if (!oidc_login(user, pass)) return 0;
+
+@ The message names the file actually consulted, so the reader is not
+left guessing which of the two possible paths was used.
+
+@<Report missing credentials@>=
+{
+    const char *f = getenv("USAS_ENV_FILE");
+    char shown[512];
+    if (f && *f) snprintf(shown, sizeof shown, "%s", f);
+    else snprintf(shown, sizeof shown, "%s%s",
+                  getenv("HOME") ? getenv("HOME") : "~", ENV_FILE_DEFAULT);
+    fprintf(stderr,
+        "Error: no USA Swimming credentials.\n"
+        "       Expected USAS_USER and USAS_PASS in %s\n"
+        "       (or in the environment).  Without them only\n"
+        "       -o offline can retrieve times.\n", shown);
+}
+
 @* Database connection.
 
-@ The \.{store} option streams rows into the local Postgres database
-\.{swim-times}; the \.{offline} option reads previously-stored rows
+@ The \.{store} option writes rows into the shared Postgres database
+\.{swimming} on \.{100.77.243.69}; the \.{offline} option reads them
 back.  Both reach Postgres {\it programmatically\/} via the standard
 client library \.{libpq} --- no \.{psql} child process or wrapper
 script is involved (this is requirement~\#3 of \.{requirements4.txt}:
-``Access the Postgres database programmatically, not through scripts'').
-A connection string can be supplied via the |SWIM_TIMES_PGCONNINFO|
-environment variable; if unset the program connects to a local
-container with the keyword string
-\.{dbname=swim-times user=postgres host=localhost port=5432}.
-Per-row inserts use \.{INSERT \dots\ ON CONFLICT \dots\ DO NOTHING}
-keyed on the unique tuple
-\.{(swimmer, event, swim\_time, swim\_date, meet)} so a duplicate
-silently no-ops without aborting the surrounding work
-(requirement~\#4: ``check for duplicates before adding \dots\ and
-recover appropriately'').
+``Access the Postgres database programmatically, not through
+scripts'').
+
+{\bf One database, named in the program.}  Earlier revisions defaulted
+to a local \.{swim-times} database and let |SWIM_TIMES_PGCONNINFO|
+override it.  That is withdrawn: the connection string is now a
+constant and no environment variable can redirect it.  The reason is
+that this program is no longer the only writer.  The \.{swimming}
+database is a shared store, and a run that silently wrote somewhere
+else --- to a stale local copy, say --- would look like it had worked
+while contributing nothing.
+
+{\bf Its schema is not ours.}  The database is normalised, not flat: a
+swim references a |swimmer_key| and a |meet_key| rather than repeating
+the swimmer's name and the meet's name on every row, and its
+|event_code|, |standard_name|, and |age_group_label| columns are
+foreign keys into reference tables.  This program adapts to that shape
+rather than adding a second, flatter table of its own beside it.  Three
+consequences run through the code below: a swimmer and a meet must be
+{\it resolved to keys\/} before a swim can be written; a motivational
+standard the reference table does not know must be written as |NULL|;
+and the primary key |swim_time_id|, which the service supplies only on
+the richer \.{GetAllTimesForFilters} feed, must be synthesised for rows
+that come from \.{BestTimes}.
 
 @<Database pipe@>=
 @<Resolve connection string@>
 @<Open and close DB connection@>
+@<Database statement helpers@>
+@<Resolve a swimmer key@>
+@<Resolve a meet key@>
+@<Synthesise a swim id@>
 @<Insert one row@>
 
-@ |db_conn_string| returns the libpq connection string.  Override
-at runtime with |SWIM_TIMES_PGCONNINFO|.
+@ |db_conn_string| returns the libpq connection string.  It is a
+constant: there is deliberately no environment override.
 
 @<Resolve connection string@>=
 static const char *db_conn_string(void)
 {
-    const char *e = getenv("SWIM_TIMES_PGCONNINFO");
-    return (e && *e)
-        ? e
-        : "dbname=swim-times user=postgres host=localhost port=5432";
+    return "dbname=swimming user=postgres "
+           "host=100.77.243.69 port=5432";
 }
 
-@ |db_open| opens a libpq connection and prepares the parameterised
-\.{INSERT \dots\ ON CONFLICT DO NOTHING} statement that all
-\code{store} writes use.  |db_close| releases the connection.  Both
-are idempotent.  The \.{ON CONFLICT} clause keys on the same unique
-constraint declared by \.{schema.sql}, so a duplicate row is a
-no-op rather than an error.
+@ |db_open| opens a libpq connection; |db_close| releases it.  Both are
+idempotent.  Statements are issued with |PQexecParams| as they are
+needed rather than prepared up front, because the write path is now
+several statements rather than one and the volume --- a few dozen rows
+per run --- does not repay the bookkeeping.
 
 @<Open and close DB connection@>=
 static PGconn *db_conn = NULL;
-#define DB_INSERT_STMT "swim_times_insert_v1"
 @<Open DB connection@>
 @<Close DB connection@>
 
@@ -507,7 +1453,6 @@ static int db_open(void)
         PQfinish(db_conn); db_conn = NULL;
         return 0;
     }
-    @<Prepare insert statement@>
     return 1;
 }
 
@@ -519,67 +1464,342 @@ static void db_close(void)
     if (db_conn) { PQfinish(db_conn); db_conn = NULL; }
 }
 
-@ The prepared insert.  Date and float casts let us pass every
-parameter as a text string; libpq does the parsing.
+@ Two small wrappers carry every statement below.  |db_scalar| runs a
+query expected to yield one value and returns it as a |long long|;
+|db_exec| runs a statement for its effect.  Both report a failure as a
+warning and continue: one unwritable row must not end a run.
 
-@<Prepare insert statement@>=
-PGresult *r = PQprepare(db_conn, DB_INSERT_STMT,
-    "INSERT INTO swim_times "
-    "(swimmer,event,swim_time,swim_date,standard,meet,sort_key) "
-    "VALUES ($1,$2,$3,$4::date,$5,$6,$7::float8) "
-    "ON CONFLICT (swimmer,event,swim_time,swim_date,meet) "
-    "DO NOTHING", 7, NULL);
-if (PQresultStatus(r) != PGRES_COMMAND_OK) {
-    fprintf(stderr, "Warning: prepare failed: %s",
-        PQerrorMessage(db_conn));
-    PQclear(r); PQfinish(db_conn); db_conn = NULL;
-    return 0;
+@<Database statement helpers@>=
+static long long db_scalar(const char *sql, int n, const char **p)
+{
+    PGresult *r = PQexecParams(db_conn, sql, n, NULL, p, NULL, NULL, 0);
+    long long v = 0;
+    if (PQresultStatus(r) == PGRES_TUPLES_OK && PQntuples(r) == 1)
+        v = strtoll(PQgetvalue(r, 0, 0), NULL, 10);
+    else if (PQresultStatus(r) != PGRES_TUPLES_OK)
+        fprintf(stderr, "Warning: %s", PQerrorMessage(db_conn));
+    PQclear(r);
+    return v;
 }
-PQclear(r);
 
-@ |db_insert_row| executes the prepared statement once for one
-\code{TimeRow}.  A duplicate hits the \.{ON CONFLICT DO NOTHING}
-branch and is silently absorbed; any other failure logs a warning
-but does not abort the run.  An empty |date|, |standard|, or |meet| is
-passed as a SQL |NULL| (a |NULL| pointer in the value array) so the
-\.{\$4::date} cast does not choke on an empty string; the best-times
-feed leaves these fields empty.
+static void db_exec(const char *sql, int n, const char **p)
+{
+    PGresult *r = PQexecParams(db_conn, sql, n, NULL, p, NULL, NULL, 0);
+    if (PQresultStatus(r) != PGRES_COMMAND_OK)
+        fprintf(stderr, "Warning: %s", PQerrorMessage(db_conn));
+    PQclear(r);
+}
+
+@ {\bf Finding the swimmer already in the table.}  This is harder than
+it looks, and getting it wrong duplicates people.
+
+The obvious lookup --- |member_id| or an exact |full_name| --- misses,
+because the two writers of this database learned their names from
+different feeds and spell them differently.  The sibling loader
+recorded middle {\it initials\/}; the feed this program reads returns
+middle {\it names\/}.  So \.{Liliya P Fedyshyn} and
+\.{Liliya Penny Fedyshyn} are one person under two spellings, and an
+exact match finds neither the row nor the collision until the |UNIQUE|
+constraint on |full_name| refuses the insert.  Case differs too:
+\.{NOVA LARUE ELLIS} against \.{Nova Larue Ellis}.
+
+So the match proceeds in three tiers, most trustworthy first:
+
+\medskip
+\item{1.} the |member_id|, which is the service's own identifier and
+  settles the question outright;
+\item{2.} the full name, compared case-insensitively;
+\item{3.} first and last name only, compared case-insensitively, which
+  bridges the middle-initial difference.
+\medskip
+
+\noindent Tiers 2 and 3 apply {\it only to rows whose |member_id| is
+|NULL|}.  That guard is what keeps the fuzziness safe: a row already
+carrying a different member id is a different person, however alike the
+names, and merging two swimmers is a far worse outcome than creating a
+duplicate.  An unlinked row, by contrast, has never been confirmed
+against the service and is exactly what tiers 2 and 3 exist to claim.
+
+@ |db_find_swimmer| implements that.  The |ORDER BY| makes the tiers
+explicit, so that when more than one row could match the strongest
+match wins.
+
+@<Resolve a swimmer key@>=
+static long long db_find_swimmer(const char *member_id, const char *name)
+{
+    const char *p[2] = { member_id, name };
+    return db_scalar(
+      "SELECT swimmer_key FROM swimmer WHERE member_id = $1"
+      " OR (member_id IS NULL AND lower(full_name) = lower($2))"
+      " OR (member_id IS NULL"
+      "     AND lower(split_part(full_name,' ',1)) ="
+      "         lower(split_part($2,' ',1))"
+      "     AND lower(regexp_replace(full_name,'^.*\\s','')) ="
+      "         lower(regexp_replace($2,'^.*\\s','')))"
+      " ORDER BY (member_id = $1) DESC,"
+      "          (lower(full_name) = lower($2)) DESC LIMIT 1", 2, p);
+}
+
+@ A swimmer no tier matched is new, and is inserted.  The insert can
+still fail, and one cause is worth naming: a row already holding this
+name under a {\it different\/} member id.  That is two distinct
+swimmers registered under one name, which the table's |UNIQUE|
+constraint refuses and which this program must not paper over by
+attaching one swimmer's times to the other.  The row is skipped and the
+conflict reported, because a person has to decide it.
+
+@<Resolve a swimmer key@>+=
+static long long db_insert_swimmer(const char *member_id, const char *name,
+                                   const char *lsc, const char *club)
+{
+    const char *ins[4] = { member_id, name, lsc, club };
+    long long k = db_scalar("INSERT INTO swimmer (member_id, full_name,"
+                            " lsc_code, club_name, last_fetched) "
+                            "VALUES ($1,$2,$3,$4,now()) "
+                            "RETURNING swimmer_key", 4, ins);
+    if (!k)
+        fprintf(stderr, "Warning: could not add swimmer \"%s\" (%s);"
+                " her times were not stored.\n", name,
+                member_id ? member_id : "no member id");
+    return k;
+}
+
+@ |db_swimmer_key| returns the key for a swimmer, creating the row if
+it is absent.  An existing row is refreshed rather than overwritten:
+|coalesce| fills in a member id, LSC, or club that was previously
+unknown without discarding one already recorded.  The recorded
+|full_name| is deliberately among the things left alone --- a loose
+match means the two spellings denote one person, not that ours is the
+better spelling --- so linking \.{Liliya P Fedyshyn} to her member id
+leaves her name as the table already had it.
+
+@<Resolve a swimmer key@>+=
+static long long db_swimmer_key(const char *member_id, const char *name,
+                                const char *lsc, const char *club)
+{
+    long long k = db_find_swimmer(member_id, name);
+    if (!k) return db_insert_swimmer(member_id, name, lsc, club);
+    char kb[32];
+    snprintf(kb, sizeof kb, "%lld", k);
+    const char *upd[4] = { kb, member_id, lsc, club };
+    db_exec("UPDATE swimmer SET member_id = coalesce(member_id,$2),"
+            " lsc_code = coalesce($3,lsc_code),"
+            " club_name = coalesce($4,club_name), last_fetched = now() "
+            "WHERE swimmer_key = $1::bigint", 4, upd);
+    return k;
+}
+
+@ |db_meet_key| resolves a meet name to its key, inserting a row when
+the name is new.  The insert supplies only |meet_name|: the service's
+own |meetId|, start and end dates come from the richer feed this
+program does not use, and leaving them |NULL| lets that feed fill them
+in later.  A nameless meet yields~0, which the caller stores as a
+|NULL| |meet_key|.
+
+@<Resolve a meet key@>=
+static long long db_meet_key(const char *meet)
+{
+    if (!meet || !*meet) return 0;
+    const char *p[1] = { meet };
+    long long k = db_scalar("SELECT meet_key FROM meet "
+                            "WHERE meet_name = $1 LIMIT 1", 1, p);
+    if (k) return k;
+    return db_scalar("INSERT INTO meet (meet_name) VALUES ($1) "
+                     "RETURNING meet_key", 1, p);
+}
+
+@ {\bf The synthesised swim id.}  |swim.swim_time_id| is the primary
+key and has no default, because it normally holds the service's own
+|swimTimeId| --- which \.{BestTimes} does not return.  A surrogate is
+therefore derived from the row's natural key by taking the leading
+sixty-three bits of its SHA-256 and negating them.  Negative values
+cannot collide with the service's own positive ids, the mapping is
+stable so re-running a fetch reproduces the same id, and the hash is
+already in the program for the \.{rate-key}.  The rows the sibling
+loader wrote from \.{BestTimes} use negative ids for the same reason.
+
+@<Synthesise a swim id@>=
+static long long swim_surrogate_id(long long swimmer, const char *event,
+                                   const char *t, const char *date,
+                                   long long meet)
+{
+    char buf[512];
+    unsigned char d[32];
+    Sha256 s;
+    snprintf(buf, sizeof buf, "%lld|%s|%s|%s|%lld",
+             swimmer, event, t, date ? date : "", meet);
+    sha256_init(&s);
+    sha256_update(&s, buf, strlen(buf));
+    sha256_final(&s, d);
+    unsigned long long h = 0;
+    for (int i = 0; i < 8; i++) h = (h << 8) | d[i];
+    h &= 0x7FFFFFFFFFFFFFFFULL;
+    return -(long long)(h ? h : 1);
+}
+
+@ |db_standard| maps a motivational standard onto the |time_standard|
+reference table, which knows the seven age-group levels and nothing
+else.  \.{BestTimes} also reports elite labels --- \.{Summer Jrs},
+\.{Nats}, \.{Trials} --- and writing one would violate the foreign key,
+so an unrecognised label becomes |NULL|.  The label is not lost to the
+reader: it still appears in the printed table and the CSV, which are
+not constrained by anyone's schema.
 
 @<Insert one row@>=
+static const char *db_standard(const char *s)
+{
+    static const char *KNOWN[] = { "A", "AA", "AAA", "AAAA",
+                                   "B", "BB", "Slower Than B" };
+    if (!s || !*s) return NULL;
+    for (size_t i = 0; i < sizeof KNOWN / sizeof KNOWN[0]; i++)
+        if (strcmp(s, KNOWN[i]) == 0) return KNOWN[i];
+    return NULL;
+}
+
+@ |db_insert_row| writes one \code{TimeRow}.  The swimmer and meet are
+resolved to keys first --- each is a query, but both are answered from
+cache after the first row of a run --- and the swim itself is then
+inserted.  |ON CONFLICT DO NOTHING| without a target absorbs {\it any\/}
+unique violation, which covers both the natural key (this swim is
+already recorded) and the primary key (an improbable surrogate
+collision), so a re-run is a no-op rather than a page of warnings.
+
+@<Insert one row@>+=
 static void db_insert_row(const char *swimmer, const char *event,
                           const TimeRow *r)
 {
     if (!db_conn) return;
-    char sk[64];
-    snprintf(sk, sizeof sk, "%g", r->sort_key);
-    const char *vals[7] = {
-        swimmer, event, r->time,
-        r->date[0]     ? r->date     : NULL,
-        r->standard[0] ? r->standard : NULL,
-        r->meet[0]     ? r->meet     : NULL, sk
-    };
-    PGresult *res = PQexecPrepared(db_conn, DB_INSERT_STMT,
-                                   7, vals, NULL, NULL, 0);
-    if (PQresultStatus(res) != PGRES_COMMAND_OK)
-        fprintf(stderr, "Warning: insert failed: %s",
-            PQerrorMessage(db_conn));
-    PQclear(res);
+    long long sk = db_swimmer_key(g_cur_member, swimmer,
+                                  g_cur_lsc[0] ? g_cur_lsc : NULL,
+                                  g_cur_club[0] ? g_cur_club : NULL);
+    if (!sk) return;
+    long long mk = db_meet_key(r->meet);
+    @<Bind the swim row@>
+    db_exec(@<The swim insert statement@>, 9, vals);
 }
 
-@* Person lookup. |lookup_member_id| posts a member search for
-|search_query| and scans the result records for one whose full name
-contains |match_substr| (after lower-casing).  It returns the
-matching swimmer's |memberId| as a heap string (an alphanumeric token
-such as \.{6CD35348E5824C}, {\it not\/} the old numeric PersonKey) and,
+@ Every parameter is passed as text and cast in SQL, which keeps the
+binding uniform; an absent value is a |NULL| pointer rather than an
+empty string, so the \.{::date} and \.{::float8} casts never see one.
+
+@<Bind the swim row@>=
+char idb[32], skb[32], mkb[32], secb[64];
+snprintf(idb, sizeof idb, "%lld",
+         swim_surrogate_id(sk, event, r->time, r->date, mk));
+snprintf(skb, sizeof skb, "%lld", sk);
+snprintf(mkb, sizeof mkb, "%lld", mk);
+snprintf(secb, sizeof secb, "%g", r->sort_key);
+const char *vals[9] = {
+    idb, skb, event,
+    mk ? mkb : NULL,
+    r->date[0] ? r->date : NULL,
+    r->time,
+    r->sort_key > 0 ? secb : NULL,
+    db_standard(r->standard),
+    g_cur_club[0] ? g_cur_club : NULL
+};
+
+@ The statement records where the row came from.  |source_endpoint| and
+|auth_mode| are columns the shared schema requires, and they are worth
+having: a reader can tell a best time scraped from \.{BestTimes} from a
+full result set loaded by the sibling program, and can tell which rows
+were gathered before the data hub required a sign-in.
+
+@<The swim insert statement@>=
+"INSERT INTO swim (swim_time_id, swimmer_key, event_code, meet_key,"
+" swim_date, swim_time, seconds, standard_name, club_name,"
+" source_endpoint, auth_mode) "
+"VALUES ($1::bigint,$2::bigint,$3,$4::bigint,$5::date,$6,"
+"$7::float8,$8,$9,'BestTimes','authenticated') "
+"ON CONFLICT DO NOTHING" 
+
+@* Person lookup.  Resolving a swimmer to her |memberId| now has two
+paths.  When the roster already carries a |member_id| we confirm it with
+\.{GET /GetMember/<id>}, which the data hub still answers for anonymous
+callers.  Otherwise we fall back to \.{POST /GetMembersForFilters},
+which it does not: that call is the first place an unauthenticated run
+now fails, and |report_http_error| says so rather than leaving the user
+with a bare ``request failed''.
+
+@ Both lookups return a member record carrying the swimmer's club and
+LSC just after her name, and the shared |swimmer| table has a column
+for each.  |capture_club_and_lsc| lifts them from wherever the caller's
+scan has reached; a record that omits either leaves the corresponding
+buffer empty, which |db_insert_row| passes on as a SQL |NULL|.
+
+@<Person lookup@>=
+static void capture_club_and_lsc(const char *p)
+{
+    g_cur_club[0] = '\0';
+    g_cur_lsc[0]  = '\0';
+    if (!p) return;
+    const char *q = p;
+    scan_string("clubName", &q, g_cur_club, sizeof g_cur_club);
+    q = p;
+    scan_string("lscCode", &q, g_cur_lsc, sizeof g_cur_lsc);
+}
+
+@ |lookup_by_member_id| takes the known identifier at face value and
+uses the lookup only to recover the swimmer's registered full name for
+display.  A non-\.{200} is reported and treated as a failure so a stale
+or mistyped id does not silently produce an empty report.
+
+@<Person lookup@>+=
+static char *lookup_by_member_id(const Swimmer *sw, const char **out_name)
+{
+    char url[512];
+    long status = 0;
+    snprintf(url, sizeof url, "%s/GetMember/%s", TIMES_API, sw->member_id);
+    g_not_found = 0;
+    char *resp = http_request(url, NULL, &status);
+    if (!resp) return NULL;
+    @<Check the member lookup status@>
+    @<Read the member record@>
+}
+
+@ An id the directory does not hold is the by-id counterpart of the
+search's \.{404}: a fact about this roster entry, not a failure of the
+service.  Anything else is a failure and stops the run.
+
+@<Check the member lookup status@>=
+if (status == 404) {
+    fprintf(stderr, "Warning: no member with id %s\n", sw->member_id);
+    g_not_found = 1;
+    free(resp);
+    return NULL;
+}
+if (status != 200) {
+    report_http_error("member lookup", url, status);
+    free(resp);
+    return NULL;
+}
+
+@ The record yields the registered full name for display and, just
+after it, the club and LSC the shared |swimmer| table records.
+
+@<Read the member record@>=
+char full[256];
+const char *p = resp;
+if (out_name)
+    *out_name = scan_string("fullName", &p, full, sizeof full)
+              ? strdup(full) : NULL;
+capture_club_and_lsc(p);
+free(resp);
+return strdup(sw->member_id);
+
+@ |lookup_member_id| posts a member search for |sw->search_query| and
+scans the result records for one whose full name contains
+|sw->match_substr| (after lower-casing).  It returns the matching
+swimmer's |memberId| as a heap string (an alphanumeric token such as
+\.{6CD35348E5824C}, {\it not\/} the old numeric PersonKey) and,
 optionally, the full name in |*out_name|.  Returns |NULL| on failure.
-The function body is split into five sub-modules.
+The function body is split into six sub-modules.
 
 @
-@<Person lookup@>=
-static char *lookup_member_id(const char *search_query,
-                              const char *match_substr,
-                              const char **out_name)
+@<Person lookup@>+=
+static char *lookup_member_id(const Swimmer *sw, const char **out_name)
 {
+    @<Take the known-memberId short cut@>
     @<Build person-search URL@>
     @<Build person-search body@>
     @<Issue person-search request@>
@@ -587,26 +1807,65 @@ static char *lookup_member_id(const char *search_query,
     @<Return person-search result@>
 }
 
+@ A roster entry that already knows its identifier never touches the
+closed search endpoint.
+
+@<Take the known-memberId short cut@>=
+if (sw->member_id && *sw->member_id)
+    return lookup_by_member_id(sw, out_name);
+
 @ The URL addresses the member-search endpoint.
 
 @<Build person-search URL@>=
 char url[512];
 snprintf(url, sizeof url, "%s/GetMembersForFilters", TIMES_API);
 
-@ The request body is a |SFPersonSearchFilters| object; only the free-text
-|name| field is needed.  The service matches |name| against member full
-names, so a distinctive surname keeps the result set small.
+@ The request body is a |SFPersonSearchFilters| object.  The original
+code sent only the free-text |name| field; we now send the complete
+four-field filter the data-hub front end sends --- |orgCode|,
+|lscCode|, |isCurrent|, |name| --- so that a body-shape check can never
+be mistaken for the authorisation failure we are actually diagnosing.
+The service matches |name| against member full names, so a distinctive
+surname keeps the result set small.
 
 @<Build person-search body@>=
 char body[512];
-snprintf(body, sizeof body, "{\"name\":\"%s\"}", search_query);
+snprintf(body, sizeof body,
+         "{\"orgCode\":null,\"lscCode\":null,\"isCurrent\":1,"
+         "\"name\":\"%s\"}", sw->search_query);
 
-@ The HTTP POST is issued; a |NULL| response is a fatal error.
+@ The HTTP POST is issued.  A |NULL| response means the request never
+completed (|http_request| has already said why).
+
+A \.{404} needs care, and getting it wrong was a defect.  The member
+search answers \.{404 Not Found} when {\it no member matches the
+name\/} --- which is a perfectly ordinary outcome for a roster entry
+whose query has gone stale, not a failure of the service.  Treating it
+as one aborted the entire roster walk at the first such entry and
+silently skipped every swimmer after it.  It now sets |g_not_found| and
+returns |NULL|, which the dispatcher reads as ``skip this one''.  Any
+other non-\.{200} is a genuine failure and still stops the run.
+
+This is the same mistake, in the same shape, as the one \.{BestTimes}
+produced: a status that means ``there is no such thing'' read as a
+status that means ``something went wrong''.  Each distinct status
+deserves its own decision.
 
 @<Issue person-search request@>=
-char *resp = http_request(url, body);
-if (!resp) {
-    fputs("Error: person lookup request failed\n", stderr);
+long status = 0;
+g_not_found = 0;
+char *resp = http_request(url, body, &status);
+if (!resp) return NULL;
+if (status == 404) {
+    fprintf(stderr, "Warning: no USA Swimming member matches \"%s\"\n",
+            sw->search_query);
+    g_not_found = 1;
+    free(resp);
+    return NULL;
+}
+if (status != 200) {
+    report_http_error("member search", url, status);
+    free(resp);
     return NULL;
 }
 
@@ -640,19 +1899,26 @@ for (size_t i = 0; i <= flen; i++)
     lower[i] = (char)(full_name[i] >= 'A' && full_name[i] <= 'Z'
                       ? full_name[i] + 32 : full_name[i]);
 
-if (strstr(lower, match_substr)) {
+if (strstr(lower, sw->match_substr)) {
     key  = strdup(member);
     name = strdup(full_name);
+    capture_club_and_lsc(p);
     break;
 }
 
-@ The response buffer is freed, a diagnostic is printed on failure, and
-the |memberId| (or |NULL|) is returned.
+@ The response buffer is freed, a diagnostic is printed when nothing
+matched, and the |memberId| (or |NULL|) is returned.  A result set that
+contains no row whose name holds |match_substr| is the same kind of
+outcome as a \.{404}: the service answered, and this swimmer is not in
+the answer.  It sets |g_not_found| too.
 
 @<Return person-search result@>=
 free(resp);
-if (!key)
-    fprintf(stderr, "Error: swimmer \"%s\" not found\n", search_query);
+if (!key) {
+    fprintf(stderr, "Warning: no search result for \"%s\" contains"
+            " \"%s\"\n", sw->search_query, sw->match_substr);
+    g_not_found = 1;
+}
 if (out_name) *out_name = name;
 else           free(name);
 return key;
@@ -729,7 +1995,7 @@ not applied online.
 typedef struct { char event[32]; TimeRow row; } CacheEntry;
 static char       g_cache_member[64] = ""; /* memberId the cache holds */
 static CacheEntry g_cache[NUM_EVENTS];     /* one best row per event   */
-static int        g_cache_n = 0;           /* live entries in g_cache  */
+static int        g_cache_n = 0;           /* live entries in |g_cache| */
 
 @ |normalize_date| converts the API's \.{"Mon DD, YYYY"} date (e.g.\
 \.{"Jan 19, 2019"}) to ISO~\.{YYYY-MM-DD}.  The ISO form sorts
@@ -774,20 +2040,40 @@ static void cache_add(const char *event, const char *time,
 }
 
 @ |fetch_pair| POSTs one \.{BestTimes} query for a stroke abbreviation
-and distance and parses every returned record into the cache.
+and distance and parses every returned record into the cache.  It
+returns~1 when the query succeeded and~0 when it did not, so that
+|build_member_cache| can abandon the remaining twenty-one pairs instead
+of replaying a refusal once per stroke and distance.
+
+One status needs care.  \.{BestTimes} answers \.{404 Not Found} when
+the swimmer has simply never swum that stroke at that distance --- and
+for a ten-year-old that is most of the thirty-one events, the 1000 and
+1650~free and the 400~IM among them.  A \.{404} is therefore data, not
+failure: the pair contributes no rows and the walk continues.  Treating
+it as an error, as an earlier draft of this revision did, aborted the
+default all-events run on the first event the swimmer had never
+entered.
 
 @<Times fetch@>+=
-static void fetch_pair(const char *member_id, const char *stroke, long dist)
+static int fetch_pair(const char *member_id, const char *stroke, long dist)
 {
     char url[256], body[256];
+    long status = 0;
     snprintf(url, sizeof url, "%s/BestTimes", TIMES_API);
     snprintf(body, sizeof body,
              "{\"memberId\":\"%s\",\"strokeAbbreviation\":\"%s\","
              "\"distance\":%ld}", member_id, stroke, dist);
-    char *resp = http_request(url, body);
-    if (!resp) return;
+    char *resp = http_request(url, body, &status);
+    if (!resp) return 0;
+    if (status == 404) { free(resp); return 1; }
+    if (status != 200) {
+        report_http_error("best-times query", url, status);
+        free(resp);
+        return 0;
+    }
     @<Parse BestTimes records@>
     free(resp);
+    return 1;
 }
 
 @ Within each record the fields appear in the fixed order |meetName|,
@@ -815,7 +2101,7 @@ thirty-one |EVENTS|).  Pairs already fetched are skipped so each POST
 runs at most once.
 
 @<Times fetch@>+=
-static void build_member_cache(const char *member_id)
+static int build_member_cache(const char *member_id)
 {
     g_cache_n = 0;
     int use_e = (g_nevents > 0);
@@ -827,9 +2113,10 @@ static void build_member_cache(const char *member_id)
         if (sscanf(code, "%ld %7s", &dist, stroke) != 2) continue;
         snprintf(key, sizeof key, "%s %ld", stroke, dist);
         @<Skip pair if already fetched@>
-        fetch_pair(member_id, stroke, dist);
+        if (!fetch_pair(member_id, stroke, dist)) return 0;
     }
     snprintf(g_cache_member, sizeof g_cache_member, "%s", member_id);
+    return 1;
 }
 
 @ A linear scan of the |done| list suppresses a repeat POST for a
@@ -846,18 +2133,21 @@ if (nd < NUM_EVENTS) snprintf(done[nd++], sizeof done[0], "%s", key);
 @ |fetch_times| reports |member_id|'s best time in |event_code|.  The
 per-member cache is rebuilt whenever the requested member changes; the
 matching row (if any) is then copied out and handed to the shared
-sort/emit chunk.
+sort/emit chunk.  It returns~0 if the cache could not be built, which
+propagates the data hub's refusal up to |main| instead of printing
+thirty-one empty event tables.
 
 @<Times fetch@>+=
-static void fetch_times(const char *member_id, const char *event_code,
-                        const char *swimmer_name, int opts,
-                        const char *date_min, const char *date_max)
+static int fetch_times(const char *member_id, const char *event_code,
+                       const char *swimmer_name, int opts,
+                       const char *date_min, const char *date_max)
 {
     (void)date_min; (void)date_max;
     if (strcmp(g_cache_member, member_id) != 0)
-        build_member_cache(member_id);
+        if (!build_member_cache(member_id)) return 0;
     @<Select cached time for event@>
     @<Sort and emit rows@>
+    return 1;
 }
 
 @ The cache holds at most one best row per event, so the selection is a
@@ -924,7 +2214,11 @@ putchar('\n');
 issues a parameterised \.{SELECT} via \.{libpq} on the shared
 |db_conn| and feeds each tuple into the same |TimeRow| array
 consumed by the shared sort/emit chunk.  No network is touched and
-no child process is spawned.  The function takes a |Swimmer|
+no child process is spawned.  Because the database is shared, this
+path reports {\it every\/} swim recorded for the swimmer in that
+event --- including the far larger set the sibling loader gathers from
+\.{GetAllTimesForFilters} --- and not merely the best times this
+program itself has written.  The function takes a |Swimmer|
 pointer so it can use both |match_substr| (for an \.{ILIKE} clause
 that maps the user keyword to whichever full name the database
 happens to hold) and the optional age window
@@ -945,19 +2239,32 @@ static void offline_fetch(const Swimmer *sw, const char *event_code, int opts)
 }
 
 @ The query uses two positional parameters: the \.{ILIKE} pattern
-(\.{\%match\_substr\%}) and the event code.  libpq quotes them
-safely so no shell-quoting hazards apply.
+(\.{\%match\_substr\%}) and the event code.  libpq quotes them safely so
+no shell-quoting hazards apply.
+
+The shape of the query is the visible face of the schema change.  A
+swim carries keys, not names, so the swimmer is reached by a join and
+the meet by an {\it outer\/} join --- |meet_key| is nullable, and a swim
+whose meet was never recorded must still be reported.  |coalesce| turns
+the nullable text columns into empty strings, which is what the row
+copier and the emitters already expect, and |to_char| renders the date
+in the ISO form the rest of the program uses.  Rows with no recorded
+time in seconds sort last rather than first.
 
 @<Build offline query params@>=
 char like_pat[256];
 snprintf(like_pat, sizeof like_pat, "%%%s%%", sw->match_substr);
 const char *params[2] = { like_pat, event_code };
 const char *q =
-    "SELECT swimmer, swim_time, "
-    "to_char(swim_date,'YYYY-MM-DD'), "
-    "standard, meet, sort_key FROM swim_times "
-    "WHERE swimmer ILIKE $1 AND event = $2 "
-    "ORDER BY sort_key";
+    "SELECT sw.full_name, s.swim_time, "
+    "coalesce(to_char(s.swim_date,'YYYY-MM-DD'),''), "
+    "coalesce(s.standard_name,''), coalesce(m.meet_name,''), "
+    "coalesce(s.seconds,0) "
+    "FROM swim s "
+    "JOIN swimmer sw ON sw.swimmer_key = s.swimmer_key "
+    "LEFT JOIN meet m ON m.meet_key = s.meet_key "
+    "WHERE sw.full_name ILIKE $1 AND s.event_code = $2 "
+    "ORDER BY s.seconds NULLS LAST";
 
 @ The query is executed, the result is iterated, and each tuple is
 copied into a |TimeRow|.  The age window is honoured here so that an
@@ -1033,35 +2340,60 @@ Kalea's entry searches ``Benavente'' because the simple two-word query
 ``Kalea Benavente'' returns no results; the API requires an exact substring
 match against the registered name ``Kalea Rose Benavente''.
 Kenneth's entry uses ``kenneth ray'' and Keith's uses ``keith santiago''
-to avoid false matches on the common surname ``Evans''.
+to avoid false matches on the common surname ``Evans''.  Both queries
+have since stopped matching anything at all --- the search now answers
+\.{404} for ``Ray Evans'' and ``Santiago Evans'' --- so both rows carry
+their |memberId| and no longer search.  This is the general remedy for
+a roster entry whose name query has gone stale, and it is cheaper
+besides: one \.{GET} instead of a \.{POST} and a scan.
 Katie Ledecky was born 17~March~1997, so the window
 \.{2006-03-17} through \.{2008-03-16} captures every swim from her
 ninth birthday up to (but not including) her eleventh.  The same
 construction yields \.{2008-03-17} through \.{2010-03-16} for the
 11- and 12-year-old window (\.{ledecky12}) and \.{2010-03-17}
 through \.{2012-03-16} for the 13- and 14-year-old window
-(\.{ledecky14}).
+(\.{ledecky14}).  Her |memberId| is a matter of public record, so the
+three Ledecky rows carry it in the sixth field and skip the member
+search entirely; the remaining rows leave |member_id| implicitly
+|NULL| and are resolved by name.
 
 @<Main function@>=
+#define LEDECKY_ID DIAG_MEMBER   /* Katie Ledecky's public memberId */
 static const Swimmer SWIMMERS[] = {
+  @<Family and Ledecky roster rows@>
+  @<CAST roster rows@>
+};
+#define NUM_SWIMMERS ((int)(sizeof SWIMMERS / sizeof SWIMMERS[0]))
+
+@ The four family swimmers the program began with, followed by Katie
+Ledecky's three age-group windows.  Only the Ledecky rows supply a
+|member_id|; the rest are resolved by name.
+
+@<Family and Ledecky roster rows@>=
   { "stella",     "Julianna Evans",  "stella",         NULL, NULL },
   { "kalea",      "Benavente",       "kalea",          NULL, NULL },
-  { "kenny",      "Ray Evans",       "kenneth ray",    NULL, NULL },
-  { "keith",      "Santiago Evans",  "keith santiago", NULL, NULL },
-  { "ledecky10",  "Ledecky",         "katie",          "2006-03-17", "2008-03-16" },
-  { "ledecky12",  "Ledecky",         "katie",          "2008-03-17", "2010-03-16" },
-  { "ledecky14",  "Ledecky",         "katie",          "2010-03-17", "2012-03-16" },
-  /* Roster added per requirements (all College Area Swim Team, LSC SI).  */
-  /* The query is "First Last"; the match token is a lower-case substring */
-  /* that uniquely picks the CAST member among the search results ---     */
-  /* chosen to sidestep nicknames and same-name swimmers in other LSCs.   */
+  { "kenny", "Ray Evans", "kenneth ray", NULL, NULL, "09562A75A1E646" },
+  { "keith", "Santiago Evans", "keith santiago", NULL, NULL,
+    "13A0A6894A4940" },
+  { "ledecky10",  "Ledecky", "katie", "2006-03-17", "2008-03-16", LEDECKY_ID },
+  { "ledecky12",  "Ledecky", "katie", "2008-03-17", "2010-03-16", LEDECKY_ID },
+  { "ledecky14",  "Ledecky", "katie", "2010-03-17", "2012-03-16", LEDECKY_ID },
+
+@ The College~Area Swim~Team roster (all LSC~SI).  The query is
+``First Last''; the match token is a lower-case substring that uniquely
+picks the CAST member among the search results --- chosen to sidestep
+nicknames and same-name swimmers in other LSCs.  Stella~J.~Evans is the
+same swimmer as \.{stella} above and so is not repeated.  This chunk is
+split from the previous one only to honour the twenty-four-line module
+limit.
+
+@<CAST roster rows@>=
   { "bothwell-emma",        "Emma Bothwell",        "emma",       NULL, NULL },
   { "coombs-wally",         "Wally Coombs",         "wally",      NULL, NULL },
   { "cruz-eva",             "Eva Cruz",             "cruz rae",   NULL, NULL },
   { "darrow-zoe",           "Zoe Darrow",           "zoe",        NULL, NULL },
   { "doan-eva",             "Eva Doan",             "eva doan",   NULL, NULL },
   { "ellis-nova",           "Nova Ellis",           "nova",       NULL, NULL },
-  /* Evans, Stella J is the same swimmer as ``stella'' above.            */
   { "fedyshyn-liliya",      "Liliya Fedyshyn",      "liliya",     NULL, NULL },
   { "glass-layla",          "Layla Glass",          "layla",      NULL, NULL },
   { "glass-logan",          "Logan Glass",          "wiley",      NULL, NULL },
@@ -1078,8 +2410,6 @@ static const Swimmer SWIMMERS[] = {
   { "soto-vivienne",        "Vivienne Soto",        "vivi",       NULL, NULL },
   { "wittmershaus-addison", "Addison Wittmershaus", "addison",    NULL, NULL },
   { "zahner-elsie",         "Elsie Zahner",         "elsie",      NULL, NULL }
-};
-#define NUM_SWIMMERS ((int)(sizeof SWIMMERS / sizeof SWIMMERS[0]))
 
 @ |parse_opts_str| tokenises a comma-separated option string (the
 argument to \.{-o}) and sets bits in |g_opts|.  Unknown tokens are
@@ -1098,6 +2428,8 @@ static void parse_opts_str(const char *s)
         else if (strcmp(tok, "csv")       == 0) g_opts |= OPT_CSV;
         else if (strcmp(tok, "store")     == 0) g_opts |= OPT_STORE;
         else if (strcmp(tok, "offline")   == 0) g_opts |= OPT_OFFLINE;
+        else if (strcmp(tok, "diag")      == 0) g_opts |= OPT_DIAG;
+        else if (strcmp(tok, "selftest")  == 0) g_opts |= OPT_SELFTEST;
         else if (g_nsel < MAX_SEL)              g_sel[g_nsel++] = strdup(tok);
         tok = strtok(NULL, ",");
     }
@@ -1151,6 +2483,12 @@ freely mixed.  With no swimmer id every swimmer on the roster is
 processed.
 
 @<Print usage flags@>=
+@<Print the option keywords@>
+@<Print the sign-in note@>
+
+@ The behaviour keywords and the two flags.
+
+@<Print the option keywords@>=
 fprintf(stderr,
     "Usage: %s -o token[,token...] [-e event[,event...]]\n\n"
     "  -o token,...    comma-separated; each token is a behaviour keyword\n"
@@ -1160,8 +2498,29 @@ fprintf(stderr,
     "       store       persist each row to Postgres swim-times via libpq\n"
     "       offline     read times from the Postgres swim-times DB\n"
     "                   instead of querying USA Swimming over the network\n"
-    "  Any other token selects a swimmer by id; with none, all are shown.\n\n",
+    "       diag        probe data-hub reachability and exit\n"
+    "       selftest    run the SHA-256/HMAC known-answer tests and exit\n"
+    "  Any other token selects a swimmer by id; with none, all are shown.\n\n"
+    "  -m memberId     fetch this data-hub memberId directly, bypassing\n"
+    "                  the roster and the name search\n\n",
     prog);
+
+@ Where the credentials come from, which is the first thing a new
+operator needs to know and the only thing they must set up.
+
+@<Print the sign-in note@>=
+fputs(
+    "  Sign-in:        every online run signs in to the USA Swimming\n"
+    "                  data hub first; there is no anonymous access.\n"
+    "                  Credentials are read from $USAS_ENV_FILE, or\n"
+    "                  $HOME/.usas-env, which should contain:\n"
+    "                      export USAS_USER=\"...\"\n"
+    "                      export USAS_PASS=\"...\"\n"
+    "                  USAS_SUB_ID and USAS_SESSION_ID, if both are\n"
+    "                  set, are used instead of signing in;\n"
+    "                  USAS_DEVICE_ID pins the Device-Id header.\n"
+    "                  Only -o offline needs no credentials at all.\n\n",
+    stderr);
 
 @ The swimmer ids are listed straight from the |SWIMMERS| roster so the
 help text can never drift out of sync with the table.
@@ -1204,11 +2563,195 @@ fprintf(stderr,
     "  %s -o stella -e \"100 FR SCY\" -e \"50 FL SCY\"\n"
     "  %s -o stella,csv,store        # fetch + print + persist to DB\n"
     "  %s -o kalea,offline           # read from DB, no network\n"
-    "  %s -o ledecky10,fastest       # Katie Ledecky as a 9-10 yr old\n",
-    prog, prog, prog, prog, prog, prog, prog, prog);
+    "  %s -o ledecky10,fastest       # Katie Ledecky as a 9-10 yr old\n"
+    "  %s -o diag                    # which endpoints can this host reach?\n"
+    "  %s -m 6CD35348E5824C          # fetch one memberId directly\n",
+    prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+
+@ {\bf Known-answer self-test.}  The \.{rate-key} a signed-in caller
+presents is only as good as the hash underneath it, and a wrong hash
+would surface as an opaque \.{403} --- indistinguishable from the
+lockout this program already has to explain.  \.{-o selftest} therefore
+checks SHA-256 and HMAC-SHA256 against the published vectors of
+\.{FIPS 180-4} and \.{RFC 4231} before anyone has to trust them.  It
+performs no I/O beyond printing its verdict.
+
+@ The expected digests, kept together so the vectors can be checked
+against the standards at a glance.
+
+@<Main function@>+=
+#define FOX "The quick brown fox jumps over the lazy dog"
+#define SHA_EMPTY \
+ "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+#define SHA_ABC \
+ "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+#define SHA_A199 \
+ "60048478ae47edd7ef18f1235afd254a72ffaf32c4bc5726e8d250c3be51e3cb"
+#define HMAC_EMPTY \
+ "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad"
+#define HMAC_FOX \
+ "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+
+@ |check_vector| compares one computed digest with its expected value,
+prints a one-line verdict, and returns the boolean so the caller can
+accumulate an overall result.
+
+@<Main function@>+=
+static int check_vector(const char *label, const char *got,
+                        const char *want)
+{
+    int ok = (strcmp(got, want) == 0);
+    printf("  %-28s %s\n", label, ok ? "ok" : "FAILED");
+    if (!ok) printf("      expected %s\n      got      %s\n", want, got);
+    return ok;
+}
+
+@ |sha256_hex| is a convenience wrapper that digests one
+null-terminated string into a hexadecimal buffer, mirroring the output
+format |hmac_sha256| already produces.
+
+@<Main function@>+=
+static void sha256_hex(const char *msg, char *hex)
+{
+    Sha256 s;
+    unsigned char d[32];
+    sha256_init(&s);
+    sha256_update(&s, msg, strlen(msg));
+    sha256_final(&s, d);
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", d[i]);
+}
+
+@ The vectors: the empty string and \.{"abc"} from \.{FIPS 180-4}, a
+200-byte message that spans four compression blocks and exercises the
+padding path, and two HMAC cases --- the empty key over the empty
+message, and \.{RFC 4231}'s ``quick brown fox''.
+
+@<Main function@>+=
+static int run_selftest(void)
+{
+    char h[65];
+    int ok = 1;
+    printf("swim-times cryptographic self-test\n\n");
+    sha256_hex("", h);
+    ok &= check_vector("SHA-256(\"\")", h, SHA_EMPTY);
+    sha256_hex("abc", h);
+    ok &= check_vector("SHA-256(\"abc\")", h, SHA_ABC);
+    @<Check the multi-block vector@>
+    hmac_sha256("", "", h);
+    ok &= check_vector("HMAC-SHA256(\"\",\"\")", h, HMAC_EMPTY);
+    hmac_sha256("key", FOX, h);
+    ok &= check_vector("HMAC-SHA256(\"key\",fox)", h, HMAC_FOX);
+    printf("\n  %s\n", ok ? "all vectors passed" : "SELF-TEST FAILED");
+    return ok ? RC_OK : RC_ERROR;
+}
+
+@ A 199-byte message crosses the 64-byte block boundary three times and
+lands in the awkward region where the length field forces an extra
+padding block.
+
+@<Check the multi-block vector@>=
+char big[200];
+memset(big, 'a', sizeof big - 1);
+big[sizeof big - 1] = '\0';
+sha256_hex(big, h);
+ok &= check_vector("SHA-256(\"a\" x 199)", h, SHA_A199);
+
+@ {\bf Diagnostics.}  \.{-o diag} answers the question the old error
+message could not: is the data hub down, is the network broken, or has
+this caller simply been refused?  It prints the identity being
+presented and then probes one endpoint from each access class, so the
+three cases are told apart at a glance --- all \.{200} means a working,
+authorised client; \.{200} on the reference feeds with \.{403} on the
+queries is the anonymous lockout; anything else is a genuine outage.
+
+@<Main function@>+=
+static void probe_endpoint(const char *label, const char *url,
+                           const char *body)
+{
+    long status = 0;
+    char *r = http_request(url, body, &status);
+    printf("  %-38s %-4s %3ld %s\n", label, body ? "POST" : "GET",
+           status, http_status_text(status));
+    free(r);
+}
+
+@ |run_diagnostics| reports the credentials in force and then walks the
+probe list.
+
+@<Main function@>+=
+static int run_diagnostics(void)
+{
+    printf("swim-times data-hub diagnostics\n\n");
+    @<Report the sign-in attempt@>
+    printf("  Usas-Sub-Id     : %s\n", usas_sub_id());
+    printf("  Usas-Session-Id : %s\n",
+           usas_session_id() ? "(set)" : "(none)");
+    printf("  Device-Id       : %s\n\n", device_id());
+    @<Probe data-hub endpoints@>
+    @<Explain the probe results@>
+    return RC_OK;
+}
+
+@ Diagnosis is the one place the program proceeds after a failed
+sign-in.  Reporting which endpoints an {\it unauthenticated\/} caller
+can still reach is exactly what the operator needs in order to tell a
+bad password from an expired session from an outage, so |run_diagnostics|
+records the outcome and probes either way.
+
+@<Report the sign-in attempt@>=
+char who[128] = "";
+int signed_in = 0;
+load_env_file();
+if (getenv("USAS_USER") || getenv("USAS_SUB_ID")) {
+    signed_in = ensure_session(1);
+    if (signed_in && activate_session(who, sizeof who))
+        printf("  Sign-in         : ok (%s)\n", who);
+    else if (signed_in)
+        printf("  Sign-in         : ok\n");
+    else
+        printf("  Sign-in         : FAILED --- probing unauthenticated\n");
+} else {
+    printf("  Sign-in         : not attempted (no credentials found)\n");
+}
+
+@ The closing note reads differently depending on whether the sign-in
+worked, because the same status means different things in the two
+cases.
+
+@<Explain the probe results@>=
+if (signed_in)
+    printf("\n  All five should read 200 for a signed-in caller.\n"
+           "  A 401 here means the session was not activated;\n"
+           "  a 403 means this account lacks the permission.\n");
+else
+    printf("\n  The last two are expected to fail without a sign-in:\n"
+           "  403 = refused as anonymous, 401 = session not recognised.\n"
+           "  Fix the credentials in the file named above and re-run.\n");
+
+@ Two reference feeds and the single-member lookup are open to anonymous
+callers; the member search and the best-times query are the two calls
+this program depends on and the two that are now closed.
+
+@<Probe data-hub endpoints@>=
+char url[512];
+snprintf(url, sizeof url, "%s/SearchFilter/GetAllEvents", SWIMS_API);
+probe_endpoint("SearchFilter/GetAllEvents", url, NULL);
+snprintf(url, sizeof url, "%s/GetTimeStandardAgeGroups", TIMES_API);
+probe_endpoint("TimesSearch/GetTimeStandardAgeGroups", url, NULL);
+snprintf(url, sizeof url, "%s/GetMember/%s", TIMES_API, DIAG_MEMBER);
+probe_endpoint("TimesSearch/GetMember/<id>", url, NULL);
+snprintf(url, sizeof url, "%s/GetMembersForFilters", TIMES_API);
+probe_endpoint("TimesSearch/GetMembersForFilters", url,
+    "{\"orgCode\":null,\"lscCode\":null,\"isCurrent\":1,"
+    "\"name\":\"Ledecky\"}");
+snprintf(url, sizeof url, "%s/BestTimes", TIMES_API);
+probe_endpoint("TimesSearch/BestTimes", url,
+    "{\"memberId\":\"" DIAG_MEMBER "\","
+    "\"strokeAbbreviation\":\"FR\",\"distance\":50}");
 
 @ We initialise the global \.{libcurl} state, parse the optional
-\.{-o} and \.{-e} flags, then for each swimmer (subject to the selected
+\.{-o}, \.{-e}, and \.{-m} flags, then for each swimmer (subject to the selected
 swimmer ids in |g_sel|) resolve her |memberId| and iterate over events.  If one or more
 \.{-e} codes were given only those events are fetched; otherwise all thirty-one
 are processed.  In CSV mode a single header line is printed before the first
@@ -1224,11 +2767,12 @@ int main(int argc, char *argv[])
     @<Fetch and print swimmer times@>
 }
 
-@ The option-parsing loop processes \.{-o} and \.{-e} flags via |getopt|.
+@ The option-parsing loop processes \.{-o}, \.{-e}, and \.{-m} flags via
+|getopt|.
 
 @<Parse command-line options@>=
 int ch;
-while ((ch = getopt(argc, argv, "o:e:")) != -1) {
+while ((ch = getopt(argc, argv, "o:e:m:")) != -1) {
     switch (ch) {
     case 'o':
         parse_opts_str(optarg);
@@ -1236,9 +2780,12 @@ while ((ch = getopt(argc, argv, "o:e:")) != -1) {
     case 'e':
         parse_events_str(optarg);
         break;
+    case 'm':
+        g_member_id = optarg;
+        break;
     default:
         print_usage(argv[0]);
-        return 2;
+        return RC_USAGE;
     }
 }
 
@@ -1248,13 +2795,16 @@ exits.  Otherwise global curl state is initialised (skipped under
 needed, and the DB pipe is opened if \.{store} was requested.
 
 @<Check for empty invocation@>=
-if (g_opts == 0 && g_nevents == 0 && g_nsel == 0) {
+if (g_opts == 0 && g_nevents == 0 && g_nsel == 0 && !g_member_id) {
     print_usage(argv[0]);
-    return 1;
+    return RC_USAGE;
 }
 
 if (!(g_opts & OPT_OFFLINE))
     curl_global_init(CURL_GLOBAL_DEFAULT);
+
+@<Run diagnostics and exit@>
+@<Sign in before fetching@>
 
 if (g_opts & OPT_CSV)
     printf("\"Swimmer\",\"Event\",\"Time\",\"Date\",\"Standard\",\"Meet\"\n");
@@ -1263,22 +2813,87 @@ if (g_opts & (OPT_STORE | OPT_OFFLINE)) {
     int ok = db_open();
     if (!ok && (g_opts & OPT_OFFLINE)) {
         fputs("Error: offline mode requires a DB connection\n", stderr);
-        return 1;
+        return RC_UNAVAIL;
     }
 }
 
+@ \.{-o diag} is a self-contained mode: it touches no database and
+fetches no swimmer, so it reports and returns before any of that is set
+up.  It is meaningless under \.{offline}, where the network is never
+used, and says so.
+
+@<Run diagnostics and exit@>=
+if (g_opts & OPT_SELFTEST) {
+    int t = run_selftest();
+    if (!(g_opts & OPT_OFFLINE)) curl_global_cleanup();
+    return t;
+}
+if (g_opts & OPT_DIAG) {
+    if (g_opts & OPT_OFFLINE) {
+        fputs("Error: diag and offline are mutually exclusive\n", stderr);
+        return RC_USAGE;
+    }
+    int d = run_diagnostics();
+    curl_global_cleanup();
+    return d;
+}
+
+@ Every online run signs in first.  There is no anonymous path: the
+data hub answers a search or a times query from an unauthenticated
+caller with \.{403} and an empty body, so attempting one would only
+waste a round trip on the way to a failure the program can already
+predict.  Under \.{offline} no network is used and no sign-in is
+attempted.  The greeting is suppressed in CSV mode, where a line of
+prose on standard output would corrupt the file.
+
+@<Sign in before fetching@>=
+if (!(g_opts & OPT_OFFLINE) && !ensure_session(g_opts & OPT_CSV)) {
+    curl_global_cleanup();
+    return RC_NOPERM;
+}
+
 @ Each swimmer is visited in turn.  The swimmer-filter mask is applied
-before the expensive |memberId| lookup.  The DB pipe (if any) is
-flushed and closed before \.{libcurl} is torn down.
+before the expensive |memberId| lookup.  \.{-m} replaces the roster
+with a single synthetic entry carrying just the requested |memberId|,
+which is how a swimmer who is not on the roster --- or one whose name
+search is now refused --- can still be fetched.  The DB connection (if
+any) is closed before \.{libcurl} is torn down, and the run's exit
+status distinguishes a refusal (|RC_NOPERM|) from any other failure.
 
 @<Fetch and print swimmer times@>=
-for (int s = 0; s < NUM_SWIMMERS; s++) {
+const Swimmer adhoc = { "member", "", "", NULL, NULL, g_member_id };
+const Swimmer *roster = g_member_id ? &adhoc : SWIMMERS;
+int nroster = g_member_id ? 1 : NUM_SWIMMERS;
+int rc = RC_OK;
+int found_any = 0;
+
+for (int s = 0; s < nroster; s++) {
     @<Process one swimmer@>
 }
 
+@<Report skipped swimmers@>
 db_close();
 if (!(g_opts & OPT_OFFLINE)) curl_global_cleanup();
-return 0;
+return rc;
+
+@ Skipped swimmers are counted rather than merely warned about, because
+a warning in the middle of thirty screens of times is a warning nobody
+reads.  The tally is repeated at the end, where it is the last thing on
+the terminal.  A run in which {\it nothing\/} resolved is a failure ---
+there is no output and no reason to pretend otherwise --- while a run
+that fetched some swimmers and skipped others succeeded, with a
+qualification the operator can act on.
+
+@<Report skipped swimmers@>=
+if (g_missing > 0)
+    fprintf(stderr,
+        "\n%d swimmer%s skipped: not found in the USA Swimming"
+        " directory.\n"
+        "Check the search_query and match_substr in the SWIMMERS"
+        " roster, or\ngive the swimmer a known member_id.\n",
+        g_missing, g_missing == 1 ? " was" : "s were");
+if (!found_any && g_missing > 0 && rc == RC_OK)
+    rc = RC_UNAVAIL;
 
 @ One swimmer is resolved and all requested events are fetched.
 Under \.{offline} the network |memberId| lookup is bypassed and the
@@ -1286,10 +2901,10 @@ swimmer's display name is taken from the database in |offline_fetch|.
 The online branch is split into its own sub-chunk.
 
 @<Process one swimmer@>=
-if (g_nsel > 0) {
+if (!g_member_id && g_nsel > 0) {
     int selected = 0;
     for (int k = 0; k < g_nsel; k++)
-        if (strcmp(g_sel[k], SWIMMERS[s].id) == 0) { selected = 1; break; }
+        if (strcmp(g_sel[k], roster[s].id) == 0) { selected = 1; break; }
     if (!selected) continue;
 }
 
@@ -1301,19 +2916,24 @@ if (g_opts & OPT_OFFLINE) {
 @<Online swimmer dispatch@>
 
 @ The online path resolves a |memberId| and dispatches the per-event
-fetcher.  A failed lookup is fatal; the DB pipe is closed and curl is
-torn down before exit.
+fetcher.  A lookup can fail in two ways and they are answered
+differently.  If the swimmer simply is not in the service's directory,
+she is skipped and the walk goes on --- one stale roster entry must not
+cost the other twenty-eight.  If the lookup failed for any other
+reason, the run stops: when the data hub has refused one swimmer for
+want of credentials it will refuse the next identically, and a page of
+the same error helps nobody.  The exit status carries which it was.
 
 @<Online swimmer dispatch@>=
 const char *name = NULL;
-char *key = lookup_member_id(SWIMMERS[s].search_query,
-                             SWIMMERS[s].match_substr,
-                             &name);
+char *key = lookup_member_id(&roster[s], &name);
 if (!key) {
-    db_close();
-    curl_global_cleanup();
-    return 1;
+    if (g_not_found) { g_missing++; continue; }
+    rc = g_auth_blocked ? RC_NOPERM : RC_UNAVAIL;
+    break;
 }
+g_cur_member = key;
+found_any = 1;
 
 if (!(g_opts & OPT_CSV))
     printf("Swimmer: %s  (MemberId: %s)\n\n",
@@ -1325,20 +2945,21 @@ free(key);
 free((void *)name);
 if (!(g_opts & OPT_CSV))
     putchar('\n');
+if (rc != RC_OK) break;
 
 @ Either the user-requested events or all thirty-one default events are
 fetched online.  The optional age window from the |Swimmer| record is
 forwarded to |fetch_times|.
 
 @<Fetch events for swimmer@>=
-if (g_nevents > 0) {
-    for (int i = 0; i < g_nevents; i++)
-        fetch_times(key, g_events[i], name, g_opts,
-                    SWIMMERS[s].date_min, SWIMMERS[s].date_max);
-} else {
-    for (int i = 0; i < NUM_EVENTS; i++)
-        fetch_times(key, EVENTS[i], name, g_opts,
-                    SWIMMERS[s].date_min, SWIMMERS[s].date_max);
+int nev = (g_nevents > 0) ? g_nevents : NUM_EVENTS;
+for (int i = 0; i < nev; i++) {
+    const char *code = (g_nevents > 0) ? g_events[i] : EVENTS[i];
+    if (!fetch_times(key, code, name, g_opts,
+                     roster[s].date_min, roster[s].date_max)) {
+        rc = g_auth_blocked ? RC_NOPERM : RC_UNAVAIL;
+        break;
+    }
 }
 
 @ The offline counterpart calls |offline_fetch| once per event.  No
@@ -1348,10 +2969,10 @@ pipe is irrelevant (\.{store} composes only with online runs).
 @<Fetch events offline@>=
 if (g_nevents > 0) {
     for (int i = 0; i < g_nevents; i++)
-        offline_fetch(&SWIMMERS[s], g_events[i], g_opts);
+        offline_fetch(&roster[s], g_events[i], g_opts);
 } else {
     for (int i = 0; i < NUM_EVENTS; i++)
-        offline_fetch(&SWIMMERS[s], EVENTS[i], g_opts);
+        offline_fetch(&roster[s], EVENTS[i], g_opts);
 }
 if (!(g_opts & OPT_CSV)) putchar('\n');
 
@@ -1371,18 +2992,64 @@ decommissioned for public callers).  Requests are ordinary HTTP
 \.{GET}/\.{POST} calls returning JSON; the OpenAPI description is
 published at \.{.../swagger/v1/swagger.json}.
 
-\gitem{Anonymous data-hub authentication}
-The times API uses no bearer token for public data.  Every request
-instead carries three headers: \.{Usas-Sub-Id} (the caller's subject,
-or the literal \.{Anonymous} when not signed in), \.{AppName: DataHub},
-and a \.{Device-Id}.  The server validates the {\it format\/} of the
-\.{Device-Id}---base64 of \.{"<platform> - <vendor> - <fingerprint> -
-<millis>"} with the first five base64 characters repeated after the
-fifteenth---so |device_id| mints a conforming value at run time.
+\gitem{Data-hub authentication}
+The times API uses no bearer token.  Every request instead carries
+\.{AppName: DataHub}, a \.{Device-Id}, and \.{Usas-Sub-Id}---the
+caller's subject, or the literal \.{Anonymous} when not signed in.  The
+server validates the {\it format\/} of the \.{Device-Id}---base64 of
+\.{"<platform> - <vendor> - <fingerprint> - <millis>"} with the first
+five base64 characters repeated after the fifteenth---and answers
+\.{400 Invalid Device-Id format in request headers} when that shape is
+violated; |device_id| mints a conforming value at run time.  A
+signed-in caller adds \.{Usas-Session-Id} and \.{rate-key}.  This
+program takes |USAS_SUB_ID|, |USAS_SESSION_ID|, and an optional
+|USAS_DEVICE_ID| from the environment.
+
+\gitem{Anonymous lockout}
+The condition, in force since 2026, in which the data hub answers
+reference queries for an anonymous caller but refuses every search and
+every times query with \.{403 Forbidden} and an empty body.  It is the
+reason this program signs in, and \.{-o diag} is what identifies it
+when a sign-in has not happened.
+
+\gitem{Session activation}
+The step, easily missed, that makes a newly-issued session usable.
+After the OpenID~Connect flow yields a \.{sub} and a \.{sid}, the times
+API still answers \.{401 Unauthorized} until
+\.{POST security/auth/GetDataHubSecurityInfoForIdp} has been called
+with that pair; afterwards it answers \.{200}.  The data hub's own
+front end makes the call on start-up as a permissions query, so the
+coupling is invisible from a browser.  |activate_session| performs it
+on every run.
+
+\gitem{Credentials file}
+\.{\$USAS\_ENV\_FILE}, or \.{\$HOME/.usas-env}: shell-style
+\.{NAME="value"} lines from which the program takes \.{USAS\_USER} and
+\.{USAS\_PASS}.  It is parsed, never sourced, and only \.{USAS\_}-prefixed
+names are honoured.
+
+\gitem{rate-key}
+A per-request throttling token a signed-in caller presents alongside
+its session id.  Its value is $\lfloor t/s\rfloor$, a dot, and the
+hexadecimal HMAC-SHA256 of the decimal spelling of $t$ keyed by the
+session id, where $t$ is the Unix time in milliseconds divided by
+$10^4$ and $s$ is the number of seconds elapsed since midnight~UTC.
+|build_rate_key| computes it; \.{-o selftest} checks the hash beneath
+it against the \.{FIPS 180-4} and \.{RFC 4231} vectors.
 
 \gitem{memberId}
 The service's identifier for a swimmer, an alphanumeric token such as
-\.{6CD35348E5824C} (it replaces the old numeric \.{PersonKey}).
+\.{6CD35348E5824C} (it replaces the old numeric \.{PersonKey}).  A
+|memberId| known in advance is worth keeping: \.{GetMember/<id>} is
+still open to anonymous callers, while the search that would otherwise
+discover the id is not.
+
+\gitem{Exit status}
+\.{0} success; \.{2} a usage error; \.{69} (|RC_UNAVAIL|) the data hub
+could not be reached or failed for a reason other than authorisation;
+\.{77} (|RC_NOPERM|) the data hub refused the request for want of
+credentials.  The last of these is the one a wrapper script should read
+as ``sign in'', not ``retry later''.
 
 @ {\bf USA Swimming REST API Calls.}
 Both endpoints live under
@@ -1393,11 +3060,45 @@ above.
 \medskip
 \item{$\bullet$} {\bf Member search.}
   \.{POST /GetMembersForFilters} with body
-  \.{\{"name":"<query>"\}}.  Returns a JSON array of member objects,
-  each with (among others) \.{memberId}, \.{fullName}, \.{clubName},
-  and \.{lscCode}.  This program scans the array for the first member
-  whose lower-cased \.{fullName} contains the match substring and keeps
-  that record's \.{memberId}.
+  \.{\{"orgCode":null,"lscCode":null,"isCurrent":1,"name":"<query>"\}}.
+  Returns a JSON array of member objects, each with (among others)
+  \.{memberId}, \.{fullName}, \.{clubName}, and \.{lscCode}.  This
+  program scans the array for the first member whose lower-cased
+  \.{fullName} contains the match substring and keeps that record's
+  \.{memberId}.  {\it Closed to anonymous callers\/}: it now answers
+  \.{403} unless \.{Usas-Sub-Id} names a signed-in subject.
+
+\item{$\bullet$} {\bf Sign-in sequence.}  \.{GET
+  dhy-prod.usaswimming.org/bff/login} begins an OpenID~Connect
+  authorization-code flow with PKCE; \.{POST
+  login.usaswimming.org/Login} submits \.{ReturnUrl}, \.{Username},
+  \.{Password}, \.{loginButton}, and \.{\_\_RequestVerificationToken}
+  as a URL-encoded form and answers \.{302} on success or \.{200} (the
+  form, re-rendered) on rejection; the authorization callback it names
+  returns an HTML \.{response\_mode=form\_post} page whose \.{code},
+  \.{state}, \.{session\_state}, and \.{iss} are posted to
+  \.{/signin-oidc}; and \.{GET /bff/userinfo} then returns the claims,
+  of which \.{sub} and \.{sid} are used.  All five steps share one
+  cookie store.
+
+\item{$\bullet$} {\bf Session activation.}
+  \.{POST security-api.usaswimming.org/security/auth/%
+GetDataHubSecurityInfoForIdp} with body
+  \.{\{"sub":"<sub>","sid":"<sid>"\}}.  Returns the signed-in user's
+  identity (\.{firstName}, \.{memberId}, \dots) and the list of
+  application routes they may read.  Its {\it side effect\/} is the
+  reason it is called: until it has run, every protected times
+  endpoint answers \.{401} for the new session.
+
+\item{$\bullet$} {\bf Single-member lookup.}
+  \.{GET /GetMember/<memberId>}.  Returns one member object with
+  \.{memberId}, \.{fullName}, \.{clubName}, \.{lscCode}, and
+  \.{swimmerAge}.  {\it Still open to anonymous callers\/}, which is
+  why a roster entry that already knows its |member_id| can skip the
+  search.  Note that adding an \.{Accept: application/json} header to
+  this call makes the service return the whole object re-encoded as a
+  single JSON string; the program therefore sends no \.{Accept} header
+  at all.
 
 \item{$\bullet$} {\bf Best-times fetch.}
   \.{POST /BestTimes} with body \.{\{"memberId":"<id>",
@@ -1458,6 +3159,30 @@ noted.
     \itemitem{} \.{CURLOPT\_WRITEDATA} ({\tt void *}) ---
       the user-data pointer passed as the fourth argument to the
       write callback; here a pointer to the |Buffer| accumulator.
+    \itemitem{} \.{CURLOPT\_USERAGENT} ({\tt char *}) ---
+      the \.{User-Agent} header; this program identifies itself
+      truthfully rather than impersonating a browser.
+    \itemitem{} \.{CURLOPT\_FOLLOWLOCATION} ({\tt long}) ---
+      non-zero to follow \.{3xx} redirects automatically.
+    \itemitem{} \.{CURLOPT\_ACCEPT\_ENCODING} ({\tt char *}) ---
+      the empty string requests every content encoding libcurl was
+      built with, and libcurl decompresses transparently.
+    \itemitem{} \.{CURLOPT\_TIMEOUT} ({\tt long}) ---
+      seconds allowed for the whole transfer.  Without it a hung
+      connection could stall a run indefinitely, which is how the
+      original version behaved.
+    \itemitem{} \.{CURLOPT\_CONNECTTIMEOUT} ({\tt long}) ---
+      seconds allowed for the connect phase alone.
+    \itemitem{} \.{CURLOPT\_COOKIEFILE} ({\tt char *}) ---
+      enables the cookie engine.  The empty string enables it without
+      reading a file, which is what the sign-in sequence wants: its
+      five steps must share a cookie store, and nothing should be
+      written to disk.
+    \itemitem{} \.{CURLOPT\_POST} / \.{CURLOPT\_HTTPGET} ({\tt long}) ---
+      select the method explicitly.  This matters only because the
+      sign-in handle is reused across steps: without an explicit
+      \.{CURLOPT\_HTTPGET} a following step would inherit the previous
+      step's \.{POST}.
   \itemitem{--} {\tt value}: type depends on {\tt option} (see above).
 
 \item{$\bullet$} {\tt curl\_easy\_perform(handle)}.
@@ -1466,6 +3191,47 @@ noted.
   callback for each received chunk.
   Returns \.{CURLE\_OK} on success or a non-zero error code; on failure
   |http_request| frees the partial buffer and returns \.{NULL}.
+  Note that a \.{403} response is {\it not\/} a failure by this
+  measure: the transfer succeeded, and the status must be read
+  separately with |curl_easy_getinfo|.  Conflating the two is the
+  defect this revision repairs.
+
+\item{$\bullet$} {\tt curl\_easy\_getinfo(handle, info, ...)}.
+  \par\noindent Parameters:
+  \itemitem{--} {\tt handle} ({\tt CURL *}): the easy handle, after
+    |curl_easy_perform| and before |curl_easy_cleanup|.
+  \itemitem{--} {\tt info} ({\tt CURLINFO}): the datum wanted.  This
+    program asks for \.{CURLINFO\_RESPONSE\_CODE} and, during sign-in,
+    \.{CURLINFO\_REDIRECT\_URL} --- the \.{Location} a request would
+    have followed had redirect-following been enabled.  The string it
+    yields belongs to the handle and must not be freed.
+  \itemitem{--} {\tt ...}: a pointer to storage of the type that
+    {\tt info} implies --- here a {\tt long *}.
+  Returns a {\tt CURLcode}.  The long is left untouched when no
+  response was received, so it is initialised to zero first.
+
+\item{$\bullet$} {\tt curl\_easy\_escape(handle, string, length)}.
+  \par\noindent Parameters:
+  \itemitem{--} {\tt handle} ({\tt CURL *}): any easy handle.
+  \itemitem{--} {\tt string} ({\tt const char *}): the text to encode.
+  \itemitem{--} {\tt length} ({\tt int}): its length, or {\tt 0} to use
+    {\tt strlen}.
+  Returns a newly-allocated percent-encoded copy, or \.{NULL}.  The
+  caller releases it with |curl_free|, {\it not\/} |free|.
+  Used by |form_add| to build the two sign-in form bodies, whose values
+  contain \.{\&}, \.{/}, \.{+}, and \.{=} in abundance.
+
+\item{$\bullet$} {\tt curl\_free(ptr)}.
+  \par\noindent Parameter: {\tt ptr} ({\tt void *}) --- memory returned
+  by a libcurl function.
+  Releases it using the allocator libcurl was built with, which need
+  not be the one this program links against.
+
+\item{$\bullet$} {\tt curl\_easy\_strerror(code)}.
+  \par\noindent Parameter: {\tt code} ({\tt CURLcode}).
+  Returns a static, human-readable description of a libcurl error
+  code.  Used so a transport failure names itself (``Could not
+  resolve host'') instead of being reported generically.
 
 \item{$\bullet$} {\tt curl\_easy\_cleanup(handle)}.
   \par\noindent Parameter: {\tt handle} ({\tt CURL *}).
@@ -1478,8 +3244,11 @@ noted.
     existing list head, or \.{NULL} to start a new list.
   \itemitem{--} {\tt string} ({\tt const char *}): the string to append.
   Returns the new list head, or \.{NULL} on allocation failure.
-  Used to build the two-header list
-  (\.{Content-Type} then \.{Authorization}).
+  Used to build the data-hub header list (\.{Content-Type},
+  \.{AppName}, \.{Origin}, \.{Referer}, \.{Usas-Sub-Id},
+  \.{Device-Id}, and, for a signed-in caller, \.{Usas-Session-Id} and
+  \.{rate-key}).  Note that libcurl does not copy the strings until
+  the transfer runs, so the caller's buffers must outlive the list.
 
 \item{$\bullet$} {\tt curl\_slist\_free\_all(list)}.
   \par\noindent Parameter: {\tt list} ({\tt struct curl\_slist *}).
@@ -1518,6 +3287,58 @@ description of each parameter, and a note on how the program uses it.
   Called on every heap string (response buffers, duplicated names and
   keys) when they are no longer needed.
 
+\item{$\bullet$} {\tt void *calloc(size\_t n, size\_t size)}.
+  \par\noindent Parameters:
+  \itemitem{--} {\tt n}: number of elements.
+  \itemitem{--} {\tt size}: bytes per element.
+  Allocates {\tt n}$\times${\tt size} bytes, zero-filled, and returns a
+  pointer to them, or \.{NULL} on failure.
+  Used in |http_request| to manufacture a one-byte, zero-filled buffer
+  --- an empty C string --- when a successful response carried no body,
+  so that \.{NULL} can mean ``no response'' and nothing else.
+
+\item{$\bullet$} {\tt int fclose(FILE *stream)}.
+  \par\noindent Parameter: {\tt stream} --- an open stream.
+  Flushes and closes it; returns {\tt 0} or \.{EOF}.
+  Closes the credentials file.
+
+\item{$\bullet$} {\tt char *fgets(char *s, int n, FILE *stream)}.
+  \par\noindent Parameters:
+  \itemitem{--} {\tt s}: destination buffer.
+  \itemitem{--} {\tt n}: its size; at most {\tt n-1} bytes are read.
+  \itemitem{--} {\tt stream}: source stream.
+  Reads up to and including the next newline, null-terminating the
+  result; returns {\tt s}, or \.{NULL} at end of file or on error.
+  Reads the credentials file one assignment at a time.
+
+\item{$\bullet$} {\tt FILE *fopen(const char *path, const char *mode)}.
+  \par\noindent Parameters:
+  \itemitem{--} {\tt path}: the file to open.
+  \itemitem{--} {\tt mode}: \.{"r"} here.
+  Returns a stream, or \.{NULL} if the file cannot be opened --- which
+  for the credentials file is not an error in itself, since the values
+  may instead be present in the environment.
+
+\item{$\bullet$} {\tt char *getenv(const char *name)}.
+  \par\noindent Parameter:
+  \itemitem{--} {\tt name}: the environment-variable name.
+  Returns a pointer to the variable's value, or \.{NULL} when it is not
+  set.  The returned string belongs to the environment and must not be
+  freed.
+  Used to read |USAS_SUB_ID|, |USAS_SESSION_ID|, |USAS_DEVICE_ID|, and
+  |SWIM_TIMES_PGCONNINFO| --- every piece of deployment-specific
+  configuration the program accepts.
+
+\item{$\bullet$} {\tt struct tm *gmtime\_r(const time\_t *t, struct tm *result)}.
+  \par\noindent Parameters:
+  \itemitem{--} {\tt t}: pointer to a calendar time.
+  \itemitem{--} {\tt result}: caller-supplied {\tt struct tm} to fill.
+  Breaks {\tt t} down into UTC calendar components and returns
+  {\tt result}, or \.{NULL} on error.  Unlike {\tt gmtime} it keeps no
+  static state and is therefore thread-safe.
+  Used by |build_rate_key| to obtain the seconds elapsed since
+  midnight~UTC, the divisor in the \.{rate-key} formula.
+
 \item{$\bullet$} {\tt void *memcpy(void *dst, const void *src, size\_t n)}.
   \par\noindent Parameters:
   \itemitem{--} {\tt dst}: destination address.
@@ -1528,6 +3349,16 @@ description of each parameter, and a note on how the program uses it.
   Returns {\tt dst}.
   Used in |write_cb| to append each network chunk to the buffer,
   and in |scan_string| to copy a JSON string value.
+
+\item{$\bullet$} {\tt void *memset(void *dst, int c, size\_t n)}.
+  \par\noindent Parameters:
+  \itemitem{--} {\tt dst}: destination address.
+  \itemitem{--} {\tt c}: fill byte (converted to {\tt unsigned char}).
+  \itemitem{--} {\tt n}: number of bytes to fill.
+  Returns {\tt dst}.
+  Used to zero-pad the HMAC key block to sixty-four bytes, which
+  \.{RFC 2104} requires, and to build the self-test's 199-byte
+  multi-block message.
 
 \item{$\bullet$} {\tt int printf(const char *fmt, ...)}.
   \par\noindent Parameters:
@@ -1544,6 +3375,37 @@ description of each parameter, and a note on how the program uses it.
   Writes one character to standard output; returns the character
   written, or \.{EOF} on error.
   Used to emit a blank line (\.{'\char`\\n'}) after each event section.
+
+\item{$\bullet$} {\tt int setenv(const char *name, const char *value, int overwrite)}.
+  \par\noindent Parameters:
+  \itemitem{--} {\tt name}: the variable to set; must contain no \.{=}.
+  \itemitem{--} {\tt value}: its new value.
+  \itemitem{--} {\tt overwrite}: when zero, an existing variable is
+    left untouched.
+  Returns {\tt 0}, or {\tt -1} on error.
+  Used twice: with {\tt overwrite} zero to publish the credentials file
+  without displacing anything already in the environment, and with
+  {\tt overwrite} one to publish the subject and session id the
+  sign-in obtained, from where |http_request| reads them.
+
+\item{$\bullet$} {\tt int strncmp(const char *a, const char *b, size\_t n)}.
+  \par\noindent Parameters:
+  \itemitem{--} {\tt a}, {\tt b}: the strings to compare.
+  \itemitem{--} {\tt n}: the maximum number of bytes to compare.
+  Returns a negative, zero, or positive value as {\tt a} sorts before,
+  equal to, or after {\tt b} within the first {\tt n} bytes.
+  Used to recognise the \.{export} keyword and the \.{USAS\_} prefix
+  when parsing the credentials file, and the HTML entities in
+  |html_unescape|.
+
+\item{$\bullet$} {\tt time\_t time(time\_t *tloc)}.
+  \par\noindent Parameter:
+  \itemitem{--} {\tt tloc}: optional address to store the result in, or
+    \.{NULL}.
+  Returns the current time as seconds since the Epoch, or
+  {\tt (time\_t)-1} on failure.
+  Used for the \.{Device-Id} fingerprint and for the \.{rate-key}
+  epoch bucket.
 
 \item{$\bullet$} {\tt void *realloc(void *ptr, size\_t size)}.
   \par\noindent Parameters:

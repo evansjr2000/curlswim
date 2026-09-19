@@ -1,0 +1,12 @@
+Today is September 18, 2026.
+
+1.  The program appears to be not working. Please find the problem and fix it.
+
+2.  After fixing the program:
+
+A.  Write a LaTex document detailing the problem, and the fixes applied.
+
+B.  Rewrite the test documentation and the test scripts.
+
+C.  Make sure the Literate Program is updated as well with proper documentation.
+

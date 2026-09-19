@@ -1,0 +1,1137 @@
+% swim-times-defect-report.tex
+% Defect investigation and corrective-action report for swim-times.
+% Compiled with: pdflatex swim-times-defect-report.tex
+
+\documentclass[11pt]{article}
+
+\usepackage{geometry}
+\geometry{letterpaper, margin=1in}
+
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\definecolor{castblue}{RGB}{0,48,135}
+\definecolor{shade}{RGB}{245,246,248}
+\definecolor{bad}{RGB}{150,30,30}
+\definecolor{good}{RGB}{20,100,50}
+
+\hypersetup{colorlinks=true, linkcolor=castblue, urlcolor=castblue,
+            citecolor=castblue}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\small College Area Swim Team}
+\fancyhead[R]{\small Defect Report: swim-times}
+\fancyfoot[C]{\thepage}
+
+\titleformat{\section}{\large\bfseries\color{castblue}}{\thesection}{0.5em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\req}[1]{\texttt{#1}}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{shade},
+  frame=single,
+  rulecolor=\color{gray!40},
+  framesep=6pt,
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  xleftmargin=0pt,
+  literate={-}{-}1
+}
+
+\begin{document}
+
+% -----------------------------------------------------------------
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  {\Huge\bfseries\color{castblue} Defect Investigation and\\[0.3em]
+   Corrective Action Report\\[0.8em]}
+  {\Large \code{swim-times}: ``the program appears to be not working''}\\[2em]
+  {\large College Area Swim Team (CAST)}\\[0.5em]
+  {\normalsize Prepared for: CAST Coaching Staff and Maintainers}\\[0.5em]
+  {\normalsize Prepared by: CAST Technology Working Group}\\[2em]
+  \begin{tabular}{ll}
+    Document identifier: & CAST-DR-001                                   \\
+    Revision:            & 4.0                                           \\
+    Date:                & September 18, 2026                            \\
+    Status:              & Released                                      \\
+    Originating request: & \code{requirements9.txt} item 1;              \\
+                         & \code{requirements10.txt} items 1--3;         \\
+                         & ``use the database on 100.77.243.69 only'';   \\
+                         & ``how do I add new swimmers''                 \\
+    Subject build:       & \code{swim-times.w} rev.\ 5.0                 \\
+  \end{tabular}
+  \vfill
+  {\small\textit{Prepared in accordance with the principles of rational
+  documentation articulated in D.\,L.\,Parnas and P.\,C.\,Clements,
+  ``A Rational Design Process: How and Why to Fake It,''
+  \textit{IEEE Transactions on Software Engineering}, vol.\,SE-12,
+  no.\,2, pp.\,251--257, February 1986.  In the spirit of that paper the
+  investigation is presented in the order a reader needs it, not in the
+  order it actually happened.}}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+% =================================================================
+\section{Executive summary}
+% =================================================================
+
+\code{swim-times} stopped returning data.  Every invocation that
+touched the network ended in a single uninformative line:
+
+\begin{lstlisting}
+$ ./swim-times -o stella
+Error: person lookup request failed
+\end{lstlisting}
+
+\noindent The investigation found \textbf{three distinct problems},
+layered one on top of another.  Only the first is an external change;
+the other two are defects in \code{swim-times} itself, and the second
+of them is what made the first so hard to see.
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{The USA Swimming Data Hub withdrew anonymous access to
+      its times endpoints.}  Member search and every times query now
+      answer \code{403 Forbidden} to a caller who is not signed in.
+      This is a policy change at the service and cannot be repaired
+      from this side; it can only be adapted to.
+\item \textbf{\code{http\_request} never looked at the HTTP status
+      code.}  It reported failure by returning \code{NULL}, and it
+      returned \code{NULL} for any response with an empty body.  A
+      \code{403} with \code{content-length:\,0} was therefore
+      indistinguishable from a dead network.  The one piece of
+      information that would have explained the outage was discarded
+      unread.
+\item \textbf{An \code{Accept:\ application/json} request header makes
+      the service double-encode its response.}  This was found while
+      fixing the first two: the endpoint that still works for anonymous
+      callers returned its payload as a JSON \emph{string} with every
+      inner quote escaped, which the program's scanner cannot read.
+\end{enumerate}
+
+\noindent All three are addressed.  The program diagnoses its own
+situation precisely, exits with a status that distinguishes ``sign in''
+from ``try again later'', and retains a fully-working offline path.
+
+\medskip
+\noindent \textbf{Revision 4.0 of this report} adds
+Section~\ref{sec:roster}: two defects found by tracing the path a new
+swimmer takes into the database, both of which would have bitten the
+first person to follow the instructions.
+
+\medskip
+\noindent \textbf{Revision 3.0} added
+Section~\ref{sec:onedb}: the program now uses a single named database
+and adapts to its schema rather than its own.
+
+\medskip
+\noindent \textbf{Revision 2.0} added
+Section~\ref{sec:signin}, which closes the matter: rather than asking
+an operator to extract a session from a browser, the program now
+\emph{signs itself in} from a stored user name and password.  Doing so
+required finding one more undocumented thing --- a newly-issued session
+is refused by the times API until a separate ``permissions'' call has
+been made against it --- and it exposed two further defects, both
+introduced by the corrective action described above.  Live retrieval
+works end to end.  Requirement-level verification stands at
+\textbf{63 passed, 0 failed, 4 skipped}, against 38 passed and 21
+skipped before this work.
+
+% =================================================================
+\section{Symptom and first observations}
+% =================================================================
+
+The reported symptom was total: no swimmer, no event, no output.
+
+\begin{lstlisting}
+$ ./swim-times -o stella
+Error: person lookup request failed
+$ echo $?
+1
+\end{lstlisting}
+
+Three facts were established before forming any hypothesis.
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{The build was healthy.}  \code{ctangle} regenerated
+      \code{swim-times.c} byte-for-byte identically to the committed
+      copy, and \code{cc -O2 -Wall} compiled it without a warning.  The
+      fault was not in the build.
+\item \textbf{DNS and TLS were healthy.}
+      \code{times-api.usaswimming.org} resolved (a Fastly CNAME) and
+      completed a TLS handshake.  The fault was not connectivity.
+\item \textbf{The service answered --- with a refusal.}  A hand-built
+      \code{curl} request reproducing the program's headers returned
+      \code{HTTP/2 403} with \code{content-length: 0}.  \emph{The
+      program had received that 403 and called it a failed request.}
+\end{enumerate}
+
+\noindent That third observation split the investigation in two: why
+does the service refuse, and why did the program not say so?
+
+% =================================================================
+\section{Root cause 1: the data hub closed its public endpoints}
+% =================================================================
+
+\subsection{Evidence}
+
+The refusal is specific, not general.  Probing one endpoint from each
+functional area, with identical headers, partitions the service's
+surface cleanly:
+
+\begin{center}
+\begin{tabular}{llc}
+\toprule
+\textbf{Endpoint} & \textbf{Kind} & \textbf{Anonymous} \\
+\midrule
+\code{SearchFilter/GetAllEvents}            & reference & \textcolor{good}{200} \\
+\code{SearchFilter/GetLscs}                 & reference & \textcolor{good}{200} \\
+\code{TimesSearch/GetTimeStandardAgeGroups} & reference & \textcolor{good}{200} \\
+\code{TimesSearch/GetMember/$\langle$id$\rangle$} & single member & \textcolor{good}{200} \\
+\midrule
+\code{TimesSearch/GetMembersForFilters}     & search & \textcolor{bad}{403} \\
+\code{TimesSearch/BestTimes}                & times  & \textcolor{bad}{403} \\
+\code{TimesSearch/GetBestTimesForMember}    & times  & \textcolor{bad}{403} \\
+\code{TimesSearch/GetAllTimesForFilters}    & times  & \textcolor{bad}{403} \\
+\code{TimesSearch/GetTopTimesLeaderBoard}   & times  & \textcolor{bad}{403} \\
+\code{Ranking/Search}, \code{Records/SFSearch} & search & \textcolor{bad}{403} \\
+\code{Meet/SFSearch}                        & search & \textcolor{bad}{403} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Three further observations confirm this is deliberate policy rather
+than an outage or a malformed request.
+
+\paragraph{The \code{403} is keyed to the anonymous subject.}
+Sending no \code{Usas-Sub-Id} at all yields \code{401 Unauthorized}.
+Sending a fabricated subject also yields \code{401}.  Only the literal
+\code{Anonymous} yields \code{403} --- the service recognises the
+anonymous caller and \emph{then} declines.  A rejection for a malformed
+body would be a \code{400}; a rejection for an unknown route would be a
+\code{404}.  Both were observed from this service in other
+circumstances, so it distinguishes them.
+
+\paragraph{The front end says the same thing.}  Asking the data hub's
+own authorisation service which routes an anonymous visitor may use:
+
+\begin{lstlisting}
+POST https://security-api.usaswimming.org/security/auth/GetDataHubSecurityInfoForIdp
+     {"sub":"Anonymous","sid":""}
+  -> { ..., "appRoutes": [ { "permissionType": "read", "routePath": "/" } ] }
+\end{lstlisting}
+
+\noindent A single route, \code{"/"}.  The browser application guards
+\code{/search} with exactly this list and redirects an anonymous
+visitor to the login page before it ever issues a times query.  The
+API and the front end agree: the public individual-times search is
+behind a login.
+
+\paragraph{The lockout arrived in stages.}  The previous revision of
+\code{swim-times.w} already records that
+\code{GetAllTimesForFilters} and \code{GetSwimmerMeets} ``require a
+signed-in subject and return \code{403} otherwise,'' while
+\code{POST /BestTimes} was then still open.  \code{BestTimes} and
+\code{GetMembersForFilters} have since joined them.  This is the third
+narrowing of the same interface --- the Sisense JAQL API was retired
+before it --- and it should be assumed to continue.
+
+\subsection{Why this cannot be ``fixed''}
+
+There is no remaining anonymous route to a swimmer's times.  Every
+endpoint that returns a swim time is closed, and the one search that
+would discover a \code{memberId} is closed with it.  No choice of
+headers, body shape, \code{Device-Id}, \code{Origin}, or user agent
+changes the outcome; each was tested individually.  A synthesised
+\code{rate-key} does not help either, since the server verifies it
+against a session it has issued.
+
+The program can therefore only \emph{adapt}: identify the condition
+precisely, offer a credentialed path for callers who have an account,
+preserve the endpoints that still work, and degrade to the local
+mirror.  Section~\ref{sec:fixes} describes what was done.
+
+% =================================================================
+\section{Root cause 2: the HTTP layer discarded the status code}
+% =================================================================
+
+This is the defect in \code{swim-times} proper, and the reason the
+outage presented as a mystery rather than as a message.
+
+\subsection{The defective code}
+
+\begin{lstlisting}
+static char *http_request(const char *url, const char *body)
+{
+    ...
+    CURLcode rc = curl_easy_perform(curl);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK) { free(buf.data); return NULL; }
+    return buf.data;                      /* <-- NULL if body was empty */
+}
+\end{lstlisting}
+
+\noindent and its caller:
+
+\begin{lstlisting}
+char *resp = http_request(url, body);
+if (!resp) {
+    fputs("Error: person lookup request failed\n", stderr);
+    return NULL;
+}
+\end{lstlisting}
+
+\subsection{The three faults in eleven lines}
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{The status code is never read.}  There is no call to
+      \code{curl\_easy\_getinfo} anywhere in the original program.
+      \code{curl\_easy\_perform} returns \code{CURLE\_OK} for a
+      \emph{completed} transfer; a \code{403} is a completed transfer.
+      The function's only notion of failure was therefore transport
+      failure, and an HTTP-level refusal was invisible to it.
+\item \textbf{\code{NULL} is overloaded.}  \code{buf.data} starts
+      \code{NULL} and is allocated by the write callback on the first
+      byte received.  A response with no body never fires the callback,
+      so \code{buf.data} stays \code{NULL} and the function returns
+      \code{NULL} --- the same value it uses to signal catastrophe.
+      The data hub answers a refused request with
+      \code{content-length: 0}.  The two cases were, quite literally,
+      the same return value.
+\item \textbf{The diagnostic asserts a cause it never established.}
+      ``Person lookup request failed'' names the operation and nothing
+      else.  It is true of a DNS failure, a TLS failure, a timeout, a
+      \code{403}, a \code{500}, and an out-of-memory condition, and it
+      distinguishes none of them.  A message that cannot be wrong is a
+      message that cannot be useful.
+\end{enumerate}
+
+\noindent Two further weaknesses were found in the same function: no
+\code{CURLOPT\_TIMEOUT} or \code{CURLOPT\_CONNECTTIMEOUT} (an
+unresponsive host could stall a run indefinitely), and no redirect
+following.
+
+\subsection{The cost of the defect}
+
+Had the status been reported, the original failure would have read
+\code{HTTP 403 Forbidden} and the investigation would have begun at
+the answer.  This is the general lesson: \emph{a diagnostic must report
+what was observed, not what the author guessed.}  The observation ---
+the status line --- was available for the cost of one function call and
+was thrown away.
+
+% =================================================================
+\section{Root cause 3: \code{Accept} makes the service double-encode}
+% =================================================================
+
+While repairing the above, the \code{GetMember} path --- one of the few
+still open to anonymous callers --- resolved the correct
+\code{memberId} but reported the swimmer's name as \code{(unknown)}.
+The response body was:
+
+\begin{lstlisting}
+"{\r\n  \"memberId\": \"6CD35348E5824C\",\r\n  \"fullName\": \"Katie ...
+\end{lstlisting}
+
+\noindent The whole document had been serialised a second time, as a
+single JSON string with every inner quote escaped.  The scanner looks
+for \code{"fullName"} and the bytes present are
+\code{\textbackslash"fullName\textbackslash"}, so the match fails and
+the field is silently skipped.
+
+The trigger is a single request header.  Holding everything else
+constant:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Headers sent} & \textbf{Response body} \\
+\midrule
+(base set)                              & plain JSON object \\
+base $+$ \code{Content-Type: application/json} & plain JSON object \\
+base $+$ \code{Accept: application/json}       & \textcolor{bad}{JSON string, escaped} \\
+base $+$ both                                  & \textcolor{bad}{JSON string, escaped} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The service's content negotiation treats an explicit
+\code{Accept} as a request to serialise its already-serialised payload
+again.  The data hub's own front end sends no \code{Accept} header, and
+neither does the corrected program.  The rule this yields is worth
+stating plainly: \textbf{send exactly the headers the service's own
+client sends, and nothing more.}  A header added for tidiness changed
+the response format.
+
+% =================================================================
+\section{Corrective actions}\label{sec:fixes}
+% =================================================================
+
+All changes are made in \code{swim-times.w}, the source of record;
+\code{swim-times.c} is regenerated from it.
+
+\subsection{The HTTP layer}
+
+\begin{lstlisting}
+static char *http_request(const char *url, const char *body, long *status)
+{
+    ...
+    CURLcode rc = curl_easy_perform(curl);
+    long code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    ...
+    if (rc != CURLE_OK) {
+        fprintf(stderr, "Error: cannot reach %s: %s\n",
+                url, curl_easy_strerror(rc));
+        free(buf.data);
+        return NULL;
+    }
+    if (status) *status = code;
+    if (!buf.data) buf.data = calloc(1, 1);   /* "" is not NULL */
+    return buf.data;
+}
+\end{lstlisting}
+
+\noindent \code{NULL} now means one thing only: the request never
+completed, and libcurl's own description of why has already been
+printed.  Every response site checks \code{*status}.  Connect and total
+timeouts are set; redirects are followed; content encodings are
+negotiated; the \code{Accept} header is not sent.
+
+\subsection{Accurate, actionable diagnostics}
+
+\code{report\_http\_error} names the operation, the status, and the URL.
+The first \code{401} or \code{403} of a run additionally prints the
+remedy --- once, not once per event per swimmer:
+
+\begin{lstlisting}
+$ ./swim-times -o stella -e "100 FR SCY"
+Error: member search failed --- HTTP 403 Forbidden
+       https://times-api.usaswimming.org/swims/TimesSearch/GetMembersForFilters
+
+  The USA Swimming Data Hub no longer answers this endpoint for
+  anonymous callers.  Member search and every times query now
+  require a signed-in account.  Two ways forward:
+
+    1. Sign in at https://data.usaswimming.org, then copy the
+       Usas-Sub-Id and Usas-Session-Id request headers the site
+       sends to times-api.usaswimming.org and re-run with
+           export USAS_SUB_ID=<subject>
+           export USAS_SESSION_ID=<session>
+
+    2. Re-run with  -o offline  to read times already mirrored in
+       the local Postgres swim-times database.
+
+  Run  -o diag  for a reachability table of the data-hub endpoints.
+$ echo $?
+77
+\end{lstlisting}
+
+\subsection{Meaningful exit codes}
+
+\begin{center}
+\begin{tabular}{rll}
+\toprule
+\textbf{Status} & \textbf{Name} & \textbf{Meaning} \\
+\midrule
+0  & \code{RC\_OK}      & success \\
+1  & \code{RC\_ERROR}   & generic failure \\
+2  & \code{RC\_USAGE}   & bad command line \\
+69 & \code{RC\_UNAVAIL} & data hub unreachable or failed --- retry later \\
+77 & \code{RC\_NOPERM}  & data hub refused for want of credentials --- sign in \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent A wrapper script can now distinguish a transient outage from
+a permissions problem without parsing English prose.
+
+\subsection{Signed-in operation}
+
+Credentials are read from the environment: \code{USAS\_SUB\_ID},
+\code{USAS\_SESSION\_ID}, and an optional \code{USAS\_DEVICE\_ID}.
+When a session id is present the program sends \code{Usas-Session-Id}
+and a \code{rate-key} computed exactly as the data hub's front end
+computes it:
+\[
+  \texttt{rate-key} \;=\;
+  \left\lfloor \frac{t}{s} \right\rfloor \;\Vert\; \texttt{"."} \;\Vert\;
+  \mathrm{HMAC\mbox{-}SHA256}_{\,\mathit{sid}}(t),
+\]
+where $t$ is the Unix time in milliseconds divided by $10^{4}$ and $s$
+is the number of seconds elapsed since midnight UTC.
+
+SHA-256 and HMAC-SHA256 are implemented in the literate source, in
+about sixty lines, rather than taking on a TLS-library dependency for
+one hash.  They are verified against the published vectors of
+\code{FIPS 180-4} and \code{RFC 4231} by \code{-o selftest}, and the
+suite cross-checks the expected digests against an independent
+implementation (Python's \code{hashlib}).  Nothing is hard-coded: the
+source contains no credential, and a test
+(\req{REQ-D-11}) fails the build if one is introduced.
+
+\subsection{A route around the closed search}
+
+\code{GetMember/$\langle$id$\rangle$} remains open to anonymous
+callers.  The \code{Swimmer} record therefore gained a sixth field,
+\code{member\_id}; when it is set, the program confirms the swimmer
+with that endpoint and never touches the closed search.  Katie
+Ledecky's three roster rows carry her public identifier and use this
+path today.  A new \code{-m $\langle$memberId$\rangle$} flag applies the
+same short cut to any member, on or off the roster.
+
+\subsection{Self-diagnosis}
+
+\code{-o diag} reports the identity being presented and probes one
+endpoint from each access class, so the three possible situations are
+told apart at a glance:
+
+\begin{lstlisting}
+$ ./swim-times -o diag
+swim-times data-hub diagnostics
+
+  Usas-Sub-Id     : Anonymous
+  Usas-Session-Id : (unset --- anonymous)
+  Device-Id       : TGludXggLSBjdXJTGludsc3dpbSAtIDg2YWQ2YWFkYTg1MCAt...
+
+  SearchFilter/GetAllEvents              GET  200 OK
+  TimesSearch/GetTimeStandardAgeGroups   GET  200 OK
+  TimesSearch/GetMember/<id>             GET  200 OK
+  TimesSearch/GetMembersForFilters       POST 403 Forbidden
+  TimesSearch/BestTimes                  POST 403 Forbidden
+
+  200 = reachable; 401/403 = sign-in required (export USAS_SUB_ID and
+  USAS_SESSION_ID).
+\end{lstlisting}
+
+\noindent All \code{200}: a working authorised client.  Reference
+\code{200} with queries \code{403}: the anonymous lockout.  Nothing
+answering: a genuine outage.  The test suite uses this same
+classification to decide which tests can meaningfully run.
+
+\subsection{Early abort instead of repeated failure}
+
+\code{fetch\_pair} and \code{build\_member\_cache} now return a status,
+and a refusal abandons the run.  Previously a locked-out full-roster
+run would have issued roughly $29 \times 22 = 638$ doomed POSTs.  It now
+issues one, reports once, and stops.
+
+\subsection{Incidental repairs}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Three \LaTeX{} errors eliminated.}  \code{pdftex} on the
+      woven documentation reported three errors before this work (an
+      underscore in a C comment, typeset in math mode) and reports none
+      now.  \code{make doc} fails the build if any reappear.
+\item \textbf{Module-size requirement restored.}  The \code{SWIMMERS}
+      roster chunk was 38 lines, in violation of the standing
+      twenty-four-line limit; it is split in two.  No chunk now exceeds
+      the limit.
+\item \textbf{Build no longer requires Docker.}  The \code{Makefile}
+      uses a native \code{ctangle}/\code{cweave} when one is on
+      \code{PATH} and falls back to the container wrapper otherwise.
+      It also gained \code{doc}, \code{report}, \code{selftest},
+      \code{diag}, \code{test}, and \code{db-test} targets.
+\item \textbf{Schema drift recorded.}  The deployed \code{swim\_times}
+      table predates \code{schema.sql}'s named constraint: its unique
+      constraint is server-named and its timestamp column is
+      \code{fetched\_at} rather than \code{loaded\_at}.  All seven
+      columns the program writes are present and the \code{ON CONFLICT}
+      tuple is correct, so behaviour is unaffected; \code{test-db.sh}
+      now matches the constraint by column set rather than by name and
+      reports the discrepancy instead of failing on it.
+\end{itemize}
+
+% =================================================================
+\section{Verification}
+% =================================================================
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Suite} & \textbf{Pass} & \textbf{Fail} & \textbf{Skip} \\
+\midrule
+\code{test-swim-times.sh} & 67 & 0 & 4 \\
+\code{test-db.sh}         & 20 & 0 & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The four skips are the refusal tests \req{REQ-E-01} through
+\req{REQ-E-04}, which cannot run while the service is answering
+normally.  Before the work of Section~\ref{sec:signin} the same host
+recorded 38 passed and 21 skipped; the twenty-one were the live-data
+tests, and signing in is what made them reachable.  Details and full
+traceability are in the Software Test Plan, \code{CAST-STP-001}.
+
+The tests that specifically pin the defects described here are:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{ID} & \textbf{Guards against} & \textbf{Root cause} \\
+\midrule
+\req{REQ-H-01} & \code{http\_request} without a status out-parameter & 2 \\
+\req{REQ-H-02} & status not read from libcurl                        & 2 \\
+\req{REQ-H-03} & empty body conflated with failure                   & 2 \\
+\req{REQ-H-04} & missing timeouts                                    & 2 \\
+\req{REQ-H-05} & reintroduction of the \code{Accept} header          & 3 \\
+\req{REQ-H-06} & an unchecked \code{http\_request} call site         & 2 \\
+\req{REQ-E-01} & a refusal exiting with a generic status             & 1 \\
+\req{REQ-E-02} & a diagnostic that does not name status and URL      & 1,\,2 \\
+\req{REQ-E-03} & advice repeated once per event                      & 1 \\
+\req{REQ-E-04} & a refusal replayed across the roster                & 1 \\
+\req{REQ-S-01} & a wrong \code{rate-key} hash                        & --- \\
+\req{REQ-G-03} & inability to classify the access tier               & 1 \\
+\midrule
+\req{REQ-L-03} & a credentials file being sourced rather than parsed  & --- \\
+\req{REQ-L-04} & a foreign setting in that file being adopted         & --- \\
+\req{REQ-L-06} & the activation step being dropped                    & --- \\
+\req{REQ-L-07} & an anonymous fallback creeping back in               & --- \\
+\req{REQ-F-34} & a \code{404} being treated as a failure              & --- \\
+\req{DB-03}    & an override redirecting the database                & --- \\
+\req{DB-08}    & a default appearing on \code{swim\_time\_id}        & --- \\
+\req{DB-14}    & an elite label reaching the foreign key             & --- \\
+\req{REQ-F-76} & an unstable surrogate id duplicating every swim     & --- \\
+\req{REQ-F-77} & a stale roster entry aborting the whole walk        & --- \\
+\req{DB-19}    & name spelling creating a duplicate person           & --- \\
+\req{DB-20}    & a loose match merging two different swimmers        & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% =================================================================
+\section{Signing in}\label{sec:signin}
+% =================================================================
+
+Sections~2--6 left the program able to \emph{use} a session but not to
+\emph{obtain} one: the operator was expected to sign in with a browser,
+open the network inspector, and copy two request headers.  That is a
+poor interface and a worse habit.  \code{requirements10.txt} asked for
+the obvious alternative --- read a user name and password from
+\code{/Users/evansjr/.usas-env}, sign in, and make that the default.
+It is implemented, and it works.
+
+\subsection{The flow}
+
+Six requests, and then a seventh step that is the interesting part.
+
+\begin{enumerate}[leftmargin=*]
+\item \code{GET dhy-prod.usaswimming.org/bff/login} --- the data hub's
+      back-end-for-front-end starts an OpenID~Connect
+      authorization-code flow with PKCE and redirects to the identity
+      provider's password form.
+\item \code{POST login.usaswimming.org/Login} --- the form is
+      resubmitted with \code{Username}, \code{Password}, the
+      \code{ReturnUrl} it carried, and its antiforgery token.  Success
+      is \code{302}; rejection is \code{200} with the form re-rendered.
+\item \code{GET} the authorization callback.  Because the client
+      registered \code{response\_mode=form\_post}, the reply is an HTML
+      page whose body is a form a browser would submit by script.
+\item \code{POST} that form's \code{code}, \code{state},
+      \code{session\_state}, and \code{iss} to \code{/signin-oidc},
+      which exchanges the code and sets the session cookie.
+\item \code{GET /bff/userinfo} --- returns the claims, of which
+      \code{sub} and \code{sid} are what the times API wants.
+\item \code{POST security-api\dots/GetDataHubSecurityInfoForIdp} with
+      that \code{sub} and \code{sid}.
+\end{enumerate}
+
+\subsection{The undocumented coupling}
+
+Step 6 looks like a permissions query.  It returns the caller's name,
+member id, and the list of application routes they may read, and
+nothing about it suggests it changes anything.  It does.
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Request} & \textbf{Before step 6} & \textbf{After step 6} \\
+\midrule
+\code{GetMembersForFilters} & \textcolor{bad}{401} & \textcolor{good}{200} \\
+\code{BestTimes}            & \textcolor{bad}{401} & \textcolor{good}{200} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent A session that has completed steps 1--5 and skipped step 6 is
+answered \code{401 Unauthorized} by every protected times endpoint.
+The same session, after one call to the security service, is answered
+\code{200}.  This was established by running the two orders against
+freshly-issued sessions repeatedly; it is not a timing effect, and
+waiting does not substitute for it.
+
+The effect is invisible from a browser, because the data hub's own
+front end issues that call on start-up for its own reasons.  It cost
+most of the time this section took to find, and it is worth recording
+plainly: \textbf{obtaining a session is not the same as activating
+one.}  \code{activate\_session} now performs step 6 on every run.
+
+That diagnosis was possible only because of the work in
+Section~\ref{sec:fixes}.  The distinction that mattered ---
+\code{401} before, \code{403} when anonymous, \code{200} after --- is
+precisely the distinction the original code discarded.
+
+\subsection{What changed in the program}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Signing in is the default and the only online path.}
+      Every run that is not \code{-o offline} signs in before issuing a
+      query.  There is no anonymous fallback: an unauthenticated search
+      is a slower route to the same \code{403}, so the program does not
+      attempt one.
+\item \textbf{Credentials come from a file},
+      \code{\$USAS\_ENV\_FILE} or \code{\$HOME/.usas-env}, in shell
+      assignment syntax.  The file is \emph{parsed, never sourced} --- a
+      command substitution in it is stored as text, not executed --- and
+      only \code{USAS\_}-prefixed names are adopted.  A value already in
+      the environment wins, so a single run can be overridden without
+      editing the file.
+\item \textbf{Failures name their cause.}  Absent credentials, rejected
+      credentials, and a broken step each get their own message, and
+      all exit \code{RC\_NOPERM}.  In particular a wrong password is
+      reported as a wrong password, not as the \code{HTTP 200} the
+      identity provider answers with.
+\item \textbf{\code{-o diag} reports the sign-in} alongside the
+      endpoint probes, and is the one mode that proceeds after a failed
+      sign-in --- reporting what an unauthenticated caller can still
+      reach is the diagnosis being requested.
+\end{itemize}
+
+\subsection{One deliberate omission}
+
+The credentials file supplied also defines
+\code{SWIM\_TIMES\_PGCONNINFO}, pointing at a database named
+\code{swimming} on another host.  That database exists but holds a
+different, normalised schema --- \code{swimmer}, \code{swim},
+\code{meet}, \code{event} --- not the flat \code{swim\_times} table this
+program writes.  Adopting the setting made \code{-o store} fail with
+\code{relation "swim\_times" does not exist}.
+
+The program therefore honours only \code{USAS\_}-prefixed names from
+the file.  Silently retargeting this program's mirror to another
+project's database is not a thing a credentials file should be able to
+do by accident.  Exporting the variable still works, for an operator who
+means it.
+
+\subsection{Two defects this work exposed}
+
+Both were introduced by the corrective action of
+Section~\ref{sec:fixes} and both were found by the test suite on its
+first authorised run --- which is the first time the suite had ever been
+able to exercise these paths.
+
+\paragraph{A \code{404} is data, not failure.}
+\code{BestTimes} answers \code{404 Not Found} when the swimmer has
+never swum that stroke at that distance.  For a ten-year-old that is
+most of the thirty-one events --- the 1000 and 1650 free, the 200
+butterfly, the 400 IM.  The abort-on-failure logic added in
+Section~\ref{sec:fixes} treated it as fatal, so the default all-events
+run ended at the first event the swimmer had never entered and printed
+\emph{nothing}.  A \code{404} now contributes no rows and the walk
+continues; \req{REQ-F-34} pins it and \req{REQ-F-21} is the end-to-end
+check.
+
+This is the mirror image of the original defect.  That one treated a
+refusal as a transport failure; this one treated an empty result as a
+refusal.  Both come from the same root: a status code carries
+information, and each distinct status deserves a decision.
+
+\paragraph{A chunk grew past the limit.}
+The usage-text chunk reached twenty-six lines, over the standing
+twenty-four-line rule, when the sign-in note was added.  It is split in
+two.  \req{REQ-D-03} caught it.
+
+\subsection{Cost}
+
+Signing in adds six HTTP requests and roughly two seconds to every
+online run.  No session is cached, because caching one would mean
+writing a live session token to disk to save two seconds --- a poor
+trade, and a staleness bug waiting to happen.  A single-event query
+takes about three seconds end to end, well inside \req{REQ-P-02}.
+
+% =================================================================
+\section{One database, and not ours}\label{sec:onedb}
+% =================================================================
+
+Section~\ref{sec:signin} closed with a recommendation: keep the
+Postgres mirror fed, because it is the only copy of the data that does
+not depend on USA Swimming's access policy.  The follow-up instruction
+made that concrete --- use the database on \code{100.77.243.69}, and
+only that one.
+
+\subsection{What was already there}
+
+The database is not empty and this program did not create it.
+\code{swimming} on that host holds 29 swimmers, 507 meets, and 4{,}482
+swims, written by a sibling loader from USA Swimming's
+\code{GetAllTimesForFilters} feed --- the richer endpoint that returns
+every swim rather than only the bests.  Its schema is normalised: a
+\code{swim} carries a \code{swimmer\_key} and a \code{meet\_key} rather
+than repeating names, and its \code{event\_code},
+\code{standard\_name}, and \code{age\_group\_label} columns are foreign
+keys into reference tables.
+
+That is not the flat \code{swim\_times} table this program had been
+writing.  Two courses were open: create \code{swim\_times} alongside,
+or adapt.  Adapting was chosen, and it is the better answer for a
+reason worth stating --- a second table would have meant two copies of
+the same swims in one database, and an \code{-o offline} that could see
+only the copy this program wrote.  Adapting means \code{-o offline} now
+reads the whole recorded history.  For Stella's 50~free short course
+that is sixteen swims where the flat table had one.
+
+\subsection{Three things the schema required}
+
+\paragraph{Keys, not names.}
+A swimmer must be resolved to a \code{swimmer\_key} before a swim can be
+written.  The lookup matches on \code{member\_id} \emph{or}
+\code{full\_name} because both are UNIQUE and three of the 29 existing
+rows predate the member id: matching on only one of them finds nothing
+and then collides on the other.  An existing row is refreshed with
+\code{coalesce} rather than overwritten, so a fetch fills in a member
+id that was missing without discarding anything already recorded.
+Meets are resolved the same way, by name.
+
+\paragraph{A primary key the feed does not supply.}
+\code{swim.swim\_time\_id} normally holds USA Swimming's own
+\code{swimTimeId}.  \code{BestTimes} does not return one.  The program
+therefore derives a surrogate: the leading 63 bits of the SHA-256 of
+the row's natural key, negated.  Negative values cannot collide with
+the service's positive ids; the mapping is stable, so a re-fetch
+reproduces the same id rather than inserting the swim again; and the
+hash was already in the program for the \code{rate-key} of
+Section~\ref{sec:signin}.  The sibling loader's own \code{BestTimes}
+rows carry negative ids for the same reason.
+
+\paragraph{A foreign key that does not know about elites.}
+\code{time\_standard} holds the seven age-group levels --- \code{B}
+through \code{AAAA} and \code{Slower Than B} --- and nothing else.
+\code{BestTimes} also reports \code{Nats}, \code{Trials}, and
+\code{Summer Jrs}, and writing one violates the foreign key.  Those map
+to SQL \code{NULL}.  The label is not lost to the reader: it still
+appears in the printed table and the CSV, neither of which is
+constrained by anyone's schema.
+
+\subsection{No override}
+
+The connection string is a compiled-in constant and
+\code{SWIM\_TIMES\_PGCONNINFO} is withdrawn.  This is deliberate and it
+is the point of the instruction.  The database is shared; a run that
+silently wrote somewhere else --- to a stale local copy, say, because a
+variable was set in some other shell --- would look like it had worked
+while contributing nothing.  There is now one place the data can go.
+
+\subsection{Verification, and one deliberate intrusion}
+
+Writing is idempotent, and that was demonstrated rather than asserted:
+a store run against swims the sibling loader had already recorded left
+the row count at 4{,}482 exactly, the bare \code{ON CONFLICT DO
+NOTHING} absorbing every one.
+
+That proves the guard but not the insert.  To show the insert actually
+writes, one row --- Stella's 100~free, \code{swim\_time\_id}
+339542386 --- was captured in full, deleted, re-fetched, and inspected.
+The program resolved \code{swimmer\_key} 2 and the existing
+\code{meet\_key} 13 rather than creating a duplicate meet, and wrote
+the date, the seconds, the \code{BB} standard, the club, and
+\code{source\_endpoint = 'BestTimes'}, \code{auth\_mode =
+'authenticated'} under a negative surrogate id.  The original row was
+then restored from the capture and the count verified back at 4{,}482
+with its \code{power\_points} and \code{age\_group\_label} intact.
+
+The test suites write only a clearly-marked fixture swimmer, removed by
+an \code{EXIT} trap so an interrupted run still cleans up.  Everything
+else they assert about the shared data is a read-only count.
+
+\subsection{Two notes for the owner of that database}
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Some swims are recorded twice already.}  The 20
+      \code{BestTimes} rows the sibling loader wrote anonymously carry
+      a \code{NULL} \code{swim\_date}, so the natural key does not match
+      the dated row for the same swim from
+      \code{GetAllTimesForFilters}.  Stella's 50~free appears both
+      ways.  This predates the present work and nothing here has been
+      changed to address it; deduplicating it is a decision for
+      whoever owns the loader.
+\item \textbf{This program writes a narrower row.}  \code{BestTimes}
+      returns no \code{swimmerAge}, \code{powerPoints}, or
+      \code{ageGroupLabel}, so rows it contributes leave those columns
+      \code{NULL} where the richer feed fills them in.  Where both
+      feeds cover a swim, the sibling loader's row is the better one ---
+      which is exactly why this program never updates an existing row,
+      only declines to duplicate it.
+\end{enumerate}
+
+% =================================================================
+\section{Adding a swimmer, and two defects on the way}\label{sec:roster}
+% =================================================================
+
+The question ``how do I add a new swimmer to the database'' has a short
+answer --- store a time for her --- and tracing it turned up two defects.
+Both were found by inspection, not by a failing test, which is itself
+worth recording: the suite had no case that walked a roster containing
+an entry the service could not resolve, and none that wrote a swimmer
+whose recorded name was spelled differently from the one the service
+returns.
+
+\subsection{There is no ``add swimmer'' operation}
+
+A \code{swimmer} row appears only as a side effect of storing a swim:
+
+\begin{lstlisting}
+-o store -> db_insert_row() -> db_swimmer_key()
+                                 |- db_find_swimmer()  SELECT ...
+                                 |- found     -> UPDATE ... coalesce(...)
+                                 `- not found -> INSERT ... RETURNING swimmer_key
+\end{lstlisting}
+
+\noindent A swimmer with no recorded times therefore never acquires a
+row, and \code{-o fastest,store} records only the fastest time per
+event.  Both follow from the design rather than contradicting it, but
+neither is obvious from outside.
+
+It is also worth noting that this program's roster is compiled in,
+while the same database carries the sibling loader's roster as data, in
+\code{swimmer\_alias} --- alias, search query, match substring, and age
+window, the same five fields as the \code{SWIMMERS} table in
+\code{swim-times.w}.  Neither reads the other, so the two drift.
+
+\subsection{Defect: a \code{404} from the member search aborted the run}
+
+\code{GetMembersForFilters} answers \code{404 Not Found} when no member
+matches the name --- an ordinary outcome for a roster entry whose query
+has gone stale.  \code{lookup\_member\_id} treated any non-\code{200} as
+fatal and the dispatcher responded by breaking out of the roster loop.
+The observed effect:
+
+\begin{lstlisting}
+$ ./swim-times -o stella,kalea,kenny,keith,bothwell-emma -e "50 FR SCY"
+Swimmer: Stella Julianna Evans  (MemberId: 12E1458C85AF42)
+Swimmer: Kalea Rose Benavente  (MemberId: 7667D74D6AD74D)
+Error: member search failed --- HTTP 404 Not Found
+\end{lstlisting}
+
+\noindent Two swimmers reported, one stale entry, and the remaining two
+silently dropped --- with an exit status suggesting the service had
+failed.  Both \code{kenny} and \code{keith} had gone stale: the queries
+\code{"Ray Evans"} and \code{"Santiago Evans"} match nothing any more.
+
+This is the same mistake as the \code{BestTimes} \code{404} of
+Section~\ref{sec:signin}, in the same shape: \textbf{a status meaning
+``there is no such thing'' read as one meaning ``something went
+wrong''.} Having fixed it once in the times path, we had not looked for
+it in the search path.
+
+The lookup now distinguishes the two outcomes with a flag, and the
+dispatcher skips rather than breaks.  Skipped swimmers are counted and
+the tally repeated at the end of the run, where it cannot be lost in
+thirty screens of times.  A run in which nothing resolved exits
+\code{RC\_UNAVAIL}; one that fetched some and skipped others exits
+\code{RC\_OK} with the tally.  \code{kenny} and \code{keith} were
+additionally given their member ids, which is the general remedy for a
+stale query and cheaper besides --- one \code{GET} instead of a
+\code{POST} and a scan.
+
+\subsection{Defect: an exact name match would have duplicated people}
+
+\code{db\_find\_swimmer} matched on \code{member\_id} or an exact
+\code{full\_name}.  The two writers of this database learned their names
+from different feeds: the sibling loader recorded middle
+\emph{initials}, and the feed this program reads returns middle
+\emph{names}.  Case differs too.
+
+Checking all 24 resolvable roster swimmers against the database:
+
+\begin{center}
+\begin{tabular}{rl}
+\toprule
+\textbf{Swimmers} & \textbf{Outcome under the old match} \\
+\midrule
+22 & matched by \code{member\_id} --- correct \\
+1  & matched by name; missing \code{member\_id} filled in --- correct \\
+\textcolor{bad}{2} & \textcolor{bad}{no match $\rightarrow$ would insert a duplicate person} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent And the two were precisely the swimmers one would most want
+to add, because they were the only roster members with \emph{zero}
+recorded swims:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{In the database} & \textbf{The service returns} \\
+\midrule
+\code{Liliya P Fedyshyn} (no member id)      & \code{Liliya Penny Fedyshyn} \\
+\code{Addison F Wittmershaus} (no member id) & \code{Addison Marie Wittmershaus} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The match now proceeds in three tiers --- member id, then full name
+case-insensitively, then first and last name only --- with the second
+and third confined to rows whose \code{member\_id} is \code{NULL}.
+That guard is the substance of the fix, not a detail of it: a row
+already carrying a different member id is a different person however
+alike the names, and \textbf{merging two swimmers is a worse outcome
+than duplicating one}.  \req{DB-20} asserts the guard directly, by
+requiring that the same loose query match \emph{nothing} once the
+fixture row carries a member id of its own.
+
+A loose match links rather than renames.  \code{member\_id},
+\code{lsc\_code}, and \code{club\_name} are filled in where absent;
+\code{full\_name} is left as the database already had it, because a
+loose match means the two spellings denote one person, not that ours is
+the better spelling.
+
+\subsection{Verification}
+
+Storing for the two affected swimmers, which before the fix would have
+created two duplicate people:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+ & \textbf{Before} & \textbf{After} \\
+\midrule
+\code{swimmer} rows          & 29 & 29 \\
+\code{swim} rows             & 4{,}482 & 4{,}496 \\
+Roster members with no swims & 2 & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Both existing rows were linked to their member ids and given
+their club, keeping the names the database already held.  Every one of
+the 29 swimmers now has recorded times.
+
+% =================================================================
+\section{Operating the program now}
+% =================================================================
+
+\subsection{Set-up, once}
+
+Put the account details in \code{\$HOME/.usas-env}:
+
+\begin{lstlisting}
+export USAS_USER="..."
+export USAS_PASS="..."
+\end{lstlisting}
+
+\noindent \code{chmod 600} it.  Nothing else is required; the program
+does the rest on every run.
+
+\subsection{Ordinary use}
+
+\begin{lstlisting}
+./swim-times -o diag                   # expect: Sign-in ok, five 200s
+./swim-times -o stella                 # all 31 events
+./swim-times -o stella,kalea,csv,store # fetch, print CSV, and mirror
+./swim-times -o kalea,fastest -e "100 FR SCY"
+./swim-times -m 12E1458C85AF42         # straight to a memberId
+\end{lstlisting}
+
+\noindent A successful run announces whose account it used
+(``\code{Signed in as John.}''), except in \code{csv} mode where a line
+of prose would corrupt the output.
+
+\subsection{Without credentials}
+
+\begin{lstlisting}
+./swim-times -o stella,offline         # read the shared database
+\end{lstlisting}
+
+\noindent \code{-o offline} needs no account and touches no network.  It
+reads \code{swimming} on \code{100.77.243.69} --- the same database
+\code{-o store} writes to, and the same one the sibling loader fills ---
+so it reports the whole recorded history, not merely this program's own
+contributions.  Keeping it fed remains the recommended routine: it is
+the only copy of the data that does not depend on USA Swimming's
+current access policy.
+
+% =================================================================
+\section{Risks and recommendations}
+% =================================================================
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Expect further narrowing.}  This is the third contraction
+      of this interface.  \code{GetMember} being open today looks more
+      like an oversight than a commitment.  \emph{Recommendation:} run
+      \code{-o diag} before relying on a fetch, and treat the Postgres
+      mirror as the system of record rather than as a cache.
+\item \textbf{Session credentials are short-lived and personal.}  They
+      are read from the environment and never written to disk by this
+      program.  \emph{Recommendation:} keep them out of shell history
+      and out of the repository; \req{REQ-D-11} fails the suite if a
+      credential appears in the source.
+\item \textbf{The \code{rate-key} path is now verified end to end.}
+      A signed-in session was obtained and the assembled header
+      accepted; all five \code{-o diag} probes return \code{200}.
+\item \textbf{The password is stored in plaintext} in
+      \code{\$HOME/.usas-env}, which is how the file was supplied and
+      what \code{requirements10.txt} asked for.  The program reads it,
+      never writes it, never logs it, and never sends it anywhere but
+      the identity provider over TLS.  \emph{Recommendation:}
+      \code{chmod 600} the file, and keep it out of the repository.
+\item \textbf{The shared database has two writers.}  Neither deletes
+      or updates the other's rows, and \code{source\_endpoint} plus
+      \code{auth\_mode} tell them apart.  \emph{Recommendation:} keep
+      it that way, and treat the sibling loader's
+      \code{GetAllTimesForFilters} rows as authoritative where both
+      feeds cover a swim.
+\item \textbf{A full refresh is roughly 640 requests.}
+      \emph{Recommendation:} run \code{./swim-times -o csv,store}
+      across the roster on a schedule rather than ad hoc, so the
+      database stays current without repeated manual passes.
+\end{enumerate}
+
+% =================================================================
+\section{References}
+% =================================================================
+
+\begin{enumerate}[leftmargin=*,label={[\arabic*]}]
+\item D.\,L.\,Parnas and P.\,C.\,Clements, ``A Rational Design Process:
+      How and Why to Fake It,'' \textit{IEEE Trans.\ Software
+      Engineering}, vol.\,SE-12, no.\,2, pp.\,251--257, Feb.\ 1986.
+\item \textit{Secure Hash Standard (SHS)}, FIPS PUB 180-4, National
+      Institute of Standards and Technology, Aug.\ 2015.
+\item H.\,Krawczyk, M.\,Bellare, R.\,Canetti, ``HMAC: Keyed-Hashing for
+      Message Authentication,'' RFC 2104, Feb.\ 1997.
+\item M.\,Nystrom, ``Identifiers and Test Vectors for HMAC-SHA-224,
+      HMAC-SHA-256, HMAC-SHA-384, and HMAC-SHA-512,'' RFC 4231,
+      Dec.\ 2005.
+\item R.\,Fielding, J.\,Reschke, eds., ``Hypertext Transfer Protocol
+      (HTTP/1.1): Semantics and Content,'' RFC 7231, Jun.\ 2014
+      (\S6.5.1 \code{400}, \S6.5.3 \code{403}, \S3.1.1.5
+      \code{Content-Type}).
+\item \textit{CAST Software Test Plan}, CAST-STP-001,
+      \code{swim-times-stp.tex}.
+\item \textit{CAST Software Requirements Specification}, CAST-SRS-001,
+      \code{swim-times-srs.tex}.
+\item \code{swim-times.w} --- the literate source of record, whose
+      woven form (\code{swim-times.pdf}) documents every change
+      described here at the point it occurs.
+\end{enumerate}
+
+\end{document}
