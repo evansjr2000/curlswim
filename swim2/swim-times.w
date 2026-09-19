@@ -317,6 +317,7 @@ If no options are given at all the program prints a usage message and exits.
 #define OPT_OFFLINE   (1<<3)  /* read from Postgres, skip network         */
 #define OPT_DIAG      (1<<4)  /* probe data-hub reachability and exit     */
 #define OPT_SELFTEST  (1<<5)  /* run the SHA-256/HMAC vectors and exit    */
+#define OPT_LIST      (1<<6)  /* list the roster and exit                 */
 
 @ |g_not_found| distinguishes the two ways a lookup can return |NULL|.
 ``The service would not answer'' must stop the run --- the next swimmer
@@ -398,6 +399,12 @@ up by name''.  The typedef lives in this section (rather than next to
 the |SWIMMERS| array in main) so that |offline_fetch| and
 |lookup_member_id| can reference it without a forward declaration.
 
+A seventh field, |label|, carries the human-readable name that
+\.{swimmer\_alias} records for an alias.  Compiled-in rows leave it
+|NULL| --- they have never needed one, since their |search_query| says
+plainly enough who they are --- and it exists for the benefit of
+\.{-o list}.
+
 @<Type definitions@>+=
 typedef struct {
     const char *id;            /* unique selection id, e.g.\ "stella"   */
@@ -406,6 +413,7 @@ typedef struct {
     const char *date_min;      /* NULL or "YYYY-MM-DD" inclusive lower  */
     const char *date_max;      /* NULL or "YYYY-MM-DD" inclusive upper  */
     const char *member_id;     /* known memberId, or NULL to search for */
+    const char *label;         /* display name, when the database has one */
 } Swimmer;
 
 @* HTTP utilities.
@@ -2411,6 +2419,176 @@ limit.
   { "wittmershaus-addison", "Addison Wittmershaus", "addison",    NULL, NULL },
   { "zahner-elsie",         "Elsie Zahner",         "elsie",      NULL, NULL }
 
+@* The roster.  Until this revision the roster was the compiled-in
+|SWIMMERS| table and nothing else, which made adding a swimmer a matter
+of editing this file and rebuilding.  That is no longer the only way
+swimmers arrive.  The \.{addswimuser} program admits them directly to
+the shared database, writing a |swimmer| row and a |swimmer_alias| row
+--- and \.{swimmer\_alias} carries {\it exactly\/} the fields this
+program's roster needs: the alias itself, the |search_query| sent to
+the data hub, the |match_substr| that picks the right candidate out of
+the results, and an optional age window.  The two designs had converged
+on the same five columns without either knowing about the other.
+
+So the roster is now the union of the two.  |SWIMMERS| is copied in
+first and the database's aliases are appended, with a compiled-in entry
+winning any collision --- its |match_substr| has been tuned by hand
+against real search results, and a run should not change behaviour
+merely because someone added a row.  A swimmer admitted by
+\.{addswimuser} is selectable here on the next run, with no rebuild.
+
+@ The merged roster, and a note of how much of it came from where so
+that \.{-o list} can say.
+
+@<Main function@>+=
+#define MAX_ROSTER 512
+static Swimmer g_roster[MAX_ROSTER];
+static int g_nroster   = 0;  /* entries in |g_roster|                    */
+static int g_ncompiled = 0;  /* how many of them came from |SWIMMERS|    */
+
+@ |roster_add| appends one entry unless its alias is already present.
+It returns~1 when it added something, which is how the loader counts
+what the database actually contributed.
+
+@<Main function@>+=
+static int roster_has(const char *alias)
+{
+    for (int i = 0; i < g_nroster; i++)
+        if (strcmp(g_roster[i].id, alias) == 0) return 1;
+    return 0;
+}
+
+static int roster_add(const Swimmer *sw)
+{
+    if (g_nroster >= MAX_ROSTER || roster_has(sw->id)) return 0;
+    g_roster[g_nroster++] = *sw;
+    return 1;
+}
+
+@ |roster_init| seeds the roster from the compiled-in table.  It runs
+before the command line is acted on, so the usage message can list the
+aliases this binary knows without touching the network or the database.
+
+@<Main function@>+=
+static void roster_init(void)
+{
+    for (int i = 0; i < NUM_SWIMMERS; i++) roster_add(&SWIMMERS[i]);
+    g_ncompiled = g_nroster;
+}
+
+@ |dup_or_field| copies one column of a result row, turning the empty
+string \.{libpq} reports for a SQL |NULL| into a |NULL| pointer, which
+is what the |Swimmer| record means by ``absent''.  The copies are never
+freed: they live as long as the roster, which lives as long as the
+process.
+
+@<Main function@>+=
+static const char *dup_or_field(PGresult *r, int row, int col)
+{
+    const char *s = PQgetvalue(r, row, col);
+    return (s && *s) ? strdup(s) : NULL;
+}
+
+@ One alias row becomes one |Swimmer|.  A row missing any of the three
+fields a lookup needs is skipped rather than half-used.
+
+@<Main function@>+=
+static int roster_add_db_row(PGresult *r, int i)
+{
+    Swimmer sw;
+    sw.id           = dup_or_field(r, i, 0);
+    sw.search_query = dup_or_field(r, i, 1);
+    sw.match_substr = dup_or_field(r, i, 2);
+    sw.date_min     = dup_or_field(r, i, 3);
+    sw.date_max     = dup_or_field(r, i, 4);
+    sw.member_id    = dup_or_field(r, i, 5);
+    sw.label        = dup_or_field(r, i, 6);
+    if (!sw.id || !sw.search_query || !sw.match_substr) return 0;
+    return roster_add(&sw);
+}
+
+@ |roster_load_db| reads every alias and appends the ones the
+compiled-in table does not already hold.  A database that cannot be
+read is a warning, not a failure: the compiled-in roster still works,
+and saying so is better than refusing to run.
+
+@<Main function@>+=
+static void roster_load_db(void)
+{
+    if (!db_conn) return;
+    PGresult *r = PQexec(db_conn, @<The alias query@>);
+    if (PQresultStatus(r) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "Warning: could not read swimmer_alias: %s",
+                PQerrorMessage(db_conn));
+        PQclear(r);
+        return;
+    }
+    int n = PQntuples(r);
+    for (int i = 0; i < n; i++) (void)roster_add_db_row(r, i);
+    PQclear(r);
+}
+
+@ The alias query.  The join to |swimmer| supplies the |member_id|,
+which is worth having for its own sake: an alias that arrives with one
+never needs the member search at all, and the search is the call most
+likely to have gone stale.
+
+@<The alias query@>=
+"SELECT a.alias, a.search_query, a.match_substr,"
+" coalesce(to_char(a.date_min,'YYYY-MM-DD'),''),"
+" coalesce(to_char(a.date_max,'YYYY-MM-DD'),''),"
+" coalesce(s.member_id,''),"
+" coalesce(a.label, s.full_name) "
+"FROM swimmer_alias a "
+"JOIN swimmer s ON s.swimmer_key = a.swimmer_key "
+"ORDER BY a.alias"
+
+@ \.{-o list} prints the merged roster.  It exists because the roster
+is no longer visible by reading this file: half of it may live in a
+database somebody else writes to, and an operator who cannot see what
+the program will accept cannot use it.
+
+@<Main function@>+=
+static int run_list(void)
+{
+    printf("swim-times roster: %d alias%s"
+           " (%d compiled in, %d from the database)\n\n",
+           g_nroster, g_nroster == 1 ? "" : "es",
+           g_ncompiled, g_nroster - g_ncompiled);
+    printf("  %-22s %-30s %-16s %s\n",
+           "alias", "swimmer", "memberId", "source");
+    printf("  %-22s %-30s %-16s %s\n",
+           "----------------------", "------------------------------",
+           "----------------", "--------");
+    for (int i = 0; i < g_nroster; i++) @<Print one roster entry@>
+    @<Note an unread database@>
+    return RC_OK;
+}
+
+@ An entry with no label is shown by the query that finds it, which is
+all a compiled-in row has ever carried.
+
+@<Print one roster entry@>=
+{
+    const Swimmer *sw = &g_roster[i];
+    char who[64];
+    if (sw->label) snprintf(who, sizeof who, "%s", sw->label);
+    else snprintf(who, sizeof who, "~%s / %s",
+                  sw->search_query, sw->match_substr);
+    printf("  %-22.22s %-30.30s %-16s %s\n", sw->id, who,
+           sw->member_id ? sw->member_id : "(by search)",
+           i < g_ncompiled ? "compiled" : "database");
+}
+
+@ If the database could not be read the listing is only half the
+answer, and it says so rather than letting the operator believe the
+roster is shorter than it is.
+
+@<Note an unread database@>=
+if (!db_conn)
+    fputs("\n  The database could not be read, so any alias admitted"
+          " by addswimuser\n  is missing from this list.\n", stderr);
+
 @ |parse_opts_str| tokenises a comma-separated option string (the
 argument to \.{-o}) and sets bits in |g_opts|.  Unknown tokens are
 silently ignored so that future options can be added without breaking
@@ -2430,6 +2608,7 @@ static void parse_opts_str(const char *s)
         else if (strcmp(tok, "offline")   == 0) g_opts |= OPT_OFFLINE;
         else if (strcmp(tok, "diag")      == 0) g_opts |= OPT_DIAG;
         else if (strcmp(tok, "selftest")  == 0) g_opts |= OPT_SELFTEST;
+        else if (strcmp(tok, "list")      == 0) g_opts |= OPT_LIST;
         else if (g_nsel < MAX_SEL)              g_sel[g_nsel++] = strdup(tok);
         tok = strtok(NULL, ",");
     }
@@ -2500,6 +2679,7 @@ fprintf(stderr,
     "                   instead of querying USA Swimming over the network\n"
     "       diag        probe data-hub reachability and exit\n"
     "       selftest    run the SHA-256/HMAC known-answer tests and exit\n"
+    "       list        list every selectable swimmer and exit\n"
     "  Any other token selects a swimmer by id; with none, all are shown.\n\n"
     "  -m memberId     fetch this data-hub memberId directly, bypassing\n"
     "                  the roster and the name search\n\n",
@@ -2526,12 +2706,13 @@ fputs(
 help text can never drift out of sync with the table.
 
 @<Print usage swimmers@>=
-fprintf(stderr, "  swimmer ids (%d):\n", NUM_SWIMMERS);
-for (int i = 0; i < NUM_SWIMMERS; i++)
+fprintf(stderr, "  swimmer ids compiled in (%d); the database may hold"
+                " more --- see -o list:\n", g_nroster);
+for (int i = 0; i < g_nroster; i++)
     fprintf(stderr, "%s%-22s%s",
             (i % 3 == 0) ? "       " : "",
-            SWIMMERS[i].id,
-            (i % 3 == 2 || i == NUM_SWIMMERS - 1) ? "\n" : " ");
+            g_roster[i].id,
+            (i % 3 == 2 || i == g_nroster - 1) ? "\n" : " ");
 fputc('\n', stderr);
 
 @ The \.{-e} event-code menu.
@@ -2565,8 +2746,9 @@ fprintf(stderr,
     "  %s -o kalea,offline           # read from DB, no network\n"
     "  %s -o ledecky10,fastest       # Katie Ledecky as a 9-10 yr old\n"
     "  %s -o diag                    # which endpoints can this host reach?\n"
-    "  %s -m 6CD35348E5824C          # fetch one memberId directly\n",
-    prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+    "  %s -m 6CD35348E5824C          # fetch one memberId directly\n"
+    "  %s -o list                    # every alias, compiled in or in the DB\n",
+    prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 
 @ {\bf Known-answer self-test.}  The \.{rate-key} a signed-in caller
 presents is only as good as the hash underneath it, and a wrong hash
@@ -2795,6 +2977,8 @@ exits.  Otherwise global curl state is initialised (skipped under
 needed, and the DB pipe is opened if \.{store} was requested.
 
 @<Check for empty invocation@>=
+roster_init();
+
 if (g_opts == 0 && g_nevents == 0 && g_nsel == 0 && !g_member_id) {
     print_usage(argv[0]);
     return RC_USAGE;
@@ -2805,16 +2989,41 @@ if (!(g_opts & OPT_OFFLINE))
 
 @<Run diagnostics and exit@>
 @<Sign in before fetching@>
+@<Open the database and extend the roster@>
+@<List the roster and exit@>
 
 if (g_opts & OPT_CSV)
     printf("\"Swimmer\",\"Event\",\"Time\",\"Date\",\"Standard\",\"Meet\"\n");
 
-if (g_opts & (OPT_STORE | OPT_OFFLINE)) {
-    int ok = db_open();
-    if (!ok && (g_opts & OPT_OFFLINE)) {
+@ The database is now opened on {\it every\/} run, not only under
+\.{store} and \.{offline}, because the roster lives there too.  A
+connection that cannot be had is fatal only for \.{offline}, which has
+no other source of times; every other mode carries on with the
+compiled-in roster and says so, because refusing to fetch a swimmer
+this binary already knows about --- merely because a server on the far
+end of an overlay network is down --- would be a poor trade.
+
+@<Open the database and extend the roster@>=
+if (!db_open()) {
+    if (g_opts & OPT_OFFLINE) {
         fputs("Error: offline mode requires a DB connection\n", stderr);
         return RC_UNAVAIL;
     }
+    fputs("Warning: continuing with the compiled-in roster only\n",
+          stderr);
+} else {
+    roster_load_db();
+}
+
+@ \.{-o list} reports and stops.  It needs the database but not the
+network, which is why the sign-in above skips it.
+
+@<List the roster and exit@>=
+if (g_opts & OPT_LIST) {
+    int t = run_list();
+    db_close();
+    if (!(g_opts & OPT_OFFLINE)) curl_global_cleanup();
+    return t;
 }
 
 @ \.{-o diag} is a self-contained mode: it touches no database and
@@ -2847,7 +3056,8 @@ attempted.  The greeting is suppressed in CSV mode, where a line of
 prose on standard output would corrupt the file.
 
 @<Sign in before fetching@>=
-if (!(g_opts & OPT_OFFLINE) && !ensure_session(g_opts & OPT_CSV)) {
+if (!(g_opts & (OPT_OFFLINE | OPT_LIST))
+    && !ensure_session(g_opts & OPT_CSV)) {
     curl_global_cleanup();
     return RC_NOPERM;
 }
@@ -2861,9 +3071,9 @@ any) is closed before \.{libcurl} is torn down, and the run's exit
 status distinguishes a refusal (|RC_NOPERM|) from any other failure.
 
 @<Fetch and print swimmer times@>=
-const Swimmer adhoc = { "member", "", "", NULL, NULL, g_member_id };
-const Swimmer *roster = g_member_id ? &adhoc : SWIMMERS;
-int nroster = g_member_id ? 1 : NUM_SWIMMERS;
+const Swimmer adhoc = { "member", "", "", NULL, NULL, g_member_id, NULL };
+const Swimmer *roster = g_member_id ? &adhoc : g_roster;
+int nroster = g_member_id ? 1 : g_nroster;
 int rc = RC_OK;
 int found_any = 0;
 

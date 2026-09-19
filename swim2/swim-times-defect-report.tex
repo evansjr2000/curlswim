@@ -66,14 +66,16 @@
   {\normalsize Prepared by: CAST Technology Working Group}\\[2em]
   \begin{tabular}{ll}
     Document identifier: & CAST-DR-001                                   \\
-    Revision:            & 4.0                                           \\
+    Revision:            & 5.0                                           \\
     Date:                & September 18, 2026                            \\
     Status:              & Released                                      \\
     Originating request: & \code{requirements9.txt} item 1;              \\
                          & \code{requirements10.txt} items 1--3;         \\
                          & ``use the database on 100.77.243.69 only'';   \\
-                         & ``how do I add new swimmers''                 \\
-    Subject build:       & \code{swim-times.w} rev.\ 5.0                 \\
+                         & ``how do I add new swimmers'';                \\
+                         & ``analyze addswimuser; make swim-times work   \\
+                         & with new users and aliases''                  \\
+    Subject build:       & \code{swim-times.w} rev.\ 6.0                 \\
   \end{tabular}
   \vfill
   {\small\textit{Prepared in accordance with the principles of rational
@@ -130,7 +132,13 @@ situation precisely, exits with a status that distinguishes ``sign in''
 from ``try again later'', and retains a fully-working offline path.
 
 \medskip
-\noindent \textbf{Revision 4.0 of this report} adds
+\noindent \textbf{Revision 5.0 of this report} adds
+Section~\ref{sec:sibling}: the sibling \code{addswimuser} program is
+broken, for a reason worth recording, and this program's roster now
+reads from the database it writes to.
+
+\medskip
+\noindent \textbf{Revision 4.0} added
 Section~\ref{sec:roster}: two defects found by tracing the path a new
 swimmer takes into the database, both of which would have bitten the
 first person to follow the instructions.
@@ -569,7 +577,7 @@ issues one, reports once, and stops.
 \toprule
 \textbf{Suite} & \textbf{Pass} & \textbf{Fail} & \textbf{Skip} \\
 \midrule
-\code{test-swim-times.sh} & 67 & 0 & 4 \\
+\code{test-swim-times.sh} & 71 & 0 & 4 \\
 \code{test-db.sh}         & 20 & 0 & 0 \\
 \bottomrule
 \end{tabular}
@@ -614,6 +622,8 @@ The tests that specifically pin the defects described here are:
 \req{REQ-F-77} & a stale roster entry aborting the whole walk        & --- \\
 \req{DB-19}    & name spelling creating a duplicate person           & --- \\
 \req{DB-20}    & a loose match merging two different swimmers        & --- \\
+\req{REQ-R-02} & a database alias becoming unselectable again        & --- \\
+\req{REQ-R-03} & a database row overriding a hand-tuned lookup       & --- \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -1027,6 +1037,130 @@ their club, keeping the names the database already held.  Every one of
 the 29 swimmers now has recorded times.
 
 % =================================================================
+\section{The sibling program, and one roster}\label{sec:sibling}
+% =================================================================
+
+Three sections of this report have referred to ``the sibling loader''
+without naming it.  It is \code{addswimuser}, in
+\code{\textasciitilde/myclaude2/addnewuser} --- itself a CWEB literate
+program, with its own ConOps, SRS, SDD, test plan and test results.  It
+admits a swimmer to the shared database:
+
+\begin{lstlisting}
+addswimuser -n <name of swimmer> -a <alias to use to look up swimmer>
+\end{lstlisting}
+
+\noindent writing a \code{swimmer} row and a \code{swimmer\_alias} row,
+then populating that swimmer's times from
+\code{GetAllTimesForFilters}.
+
+\subsection{It no longer works}
+
+\begin{lstlisting}
+$ ./addswimuser -n "Maren Murch" -a mmurch-probe --dry-run
+addswimuser: recipe: query "Murch", match "maren", club "College Area Swim Team"
+warning: login step 3: no authorization code (bad username or password?)
+warning: sign-in failed; continuing anonymously, which costs the age of every swim fetched
+error: member search for "Murch": HTTP 403 (forbidden: subject not authorized)
+\end{lstlisting}
+
+\noindent The credentials are not wrong --- the same pair signs
+\code{swim-times} in on the same machine.  Two defects, one of which is
+fatal on its own.
+
+\paragraph{The submit field was renamed.}
+\code{addswimuser} posts \code{button=login} to the identity provider.
+The form's field is now \code{loginButton}.  What makes this hard to
+see is that the login endpoint \emph{accepts} the request either way
+and answers \code{302}; the denial comes one redirect later, at the
+authorization endpoint, as a \code{form\_post} page carrying
+\code{error=access\_denied} instead of a code.  Holding everything else
+constant:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Posted} & \textbf{Result after following the redirect} \\
+\midrule
+\code{button=login}      & \textcolor{bad}{\code{error=access\_denied}, no code} \\
+\code{loginButton=login} & \textcolor{good}{code returned, login succeeds} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Its own diagnostic --- ``no authorization code (bad username
+or password?)'' --- is honest about what it saw and wrong about why,
+which is the most expensive kind of error message.  The password was
+never the problem.
+
+\paragraph{And the session is never activated.}
+\code{addswimuser} contains no call to
+\code{GetDataHubSecurityInfoForIdp}.  Section~\ref{sec:signin} records
+what that costs: a session that has completed the OpenID~Connect flow
+is answered \code{401} by every protected times endpoint until that
+call is made.  So fixing the field name alone would move the failure
+from \code{403} to \code{401} without fixing it.
+
+Both repairs are small and both are already written and proven in
+\code{swim-times.w}; neither has been applied to \code{addswimuser},
+which is a separate repository and was not in scope.
+
+\subsection{One roster, in two places}
+
+\code{addswimuser} writes \code{swimmer\_alias}, and that table turns
+out to carry \emph{exactly} the fields this program's roster needs: the
+alias, the \code{search\_query} sent to the data hub, the
+\code{match\_substr} that picks the right candidate from the results,
+and an optional age window.  Two programs, written independently, had
+converged on the same five columns --- one holding them as a compiled-in
+C table, the other as rows.
+
+Neither read the other's, so they drifted.  \code{mmurch} has been in
+the database since August with 141 recorded swims, and
+\code{swim-times} could not select her.
+
+The roster is now their union.  \code{SWIMMERS} is copied in first and
+the database's aliases appended; a compiled-in entry wins any
+collision, because its \code{match\_substr} has been tuned by hand and
+behaviour should not change merely because a row was added elsewhere.
+An alias that arrives from the database brings its \code{member\_id}
+with it, which is the sturdiest lookup there is --- no search, and
+nothing to go stale.
+
+\begin{lstlisting}
+$ ./swim-times -o list
+swim-times roster: 33 aliases (29 compiled in, 4 from the database)
+
+  alias                  swimmer                        memberId         source
+  ---------------------- ------------------------------ ---------------- --------
+  stella                 ~Julianna Evans / stella       (by search)      compiled
+  ...
+  cmadden                Clair Madden                   1970F79F814240   database
+  ledecky                Katie Ledecky, all ages        6CD35348E5824C   database
+  ledecky16              Katie Ledecky, age group 15-16 6CD35348E5824C   database
+  mmurch                 Maren Murch                    29B0D16B40AD4D   database
+\end{lstlisting}
+
+\noindent \code{-o list} exists because the roster is no longer legible
+by reading the source.  It needs the database but not the network, and
+does not sign in.
+
+The database is now opened on every run rather than only under
+\code{store} and \code{offline}.  A database that cannot be reached is a
+warning for every mode but \code{offline}, which has no other source of
+times: refusing to fetch a swimmer this binary already knows about,
+because a server at the far end of an overlay network is down, would be
+a poor trade.
+
+\subsection{Verification}
+
+\code{mmurch} --- a database-only alias, never named in this program's
+source --- fetches live, and \code{cmadden} reads offline, neither
+requiring a rebuild.  \req{REQ-R-02} derives its expectation from
+\code{swimmer\_alias} at run time rather than hard-coding a list, so it
+is the case that would catch this regressing.
+
+% =================================================================
 \section{Operating the program now}
 % =================================================================
 
@@ -1045,6 +1179,7 @@ does the rest on every run.
 \subsection{Ordinary use}
 
 \begin{lstlisting}
+./swim-times -o list                   # every selectable alias
 ./swim-times -o diag                   # expect: Sign-in ok, five 200s
 ./swim-times -o stella                 # all 31 events
 ./swim-times -o stella,kalea,csv,store # fetch, print CSV, and mirror

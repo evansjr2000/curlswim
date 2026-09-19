@@ -47,7 +47,7 @@
   {\normalsize Prepared by: CAST Technology Working Group}\\[2em]
   \begin{tabular}{ll}
     Document identifier: & CAST-SRS-001                                     \\
-    Revision:            & 6.0                                              \\
+    Revision:            & 7.0                                              \\
     Date:                & September 18, 2026                              \\
     Status:              & Released                                         \\
     Governing standard:  & ISO/IEC/IEEE 29148-2018 (Requirements Engineering) \\
@@ -319,6 +319,26 @@ The program has two user classes:
 \label{sec:roster}
 
 \begin{description}[style=nextline]
+  \item[\req{REQ-R-01}] The roster shall be the union of the compiled-in
+        \code{SWIMMERS} table and the \code{swimmer\_alias} table of the
+        shared database.  A swimmer admitted to that database by
+        \code{addswimuser} shall be selectable by this program on the
+        next run, with no rebuild.
+  \item[\req{REQ-R-02}] Where an alias appears in both, the compiled-in
+        entry shall win.  Its \code{match\_substr} has been tuned by
+        hand against real search results, and behaviour shall not change
+        merely because a row was added elsewhere.
+  \item[\req{REQ-R-03}] A database that cannot be read shall be a
+        warning, not a failure, for every mode except \code{offline}:
+        the compiled-in roster still works, and refusing to fetch a
+        known swimmer because a remote server is down is a poor trade.
+  \item[\req{REQ-R-04}] The program shall provide \code{-o list},
+        printing every selectable alias with the swimmer it names, its
+        \code{memberId} if known, and whether it came from the binary or
+        the database.  The roster is no longer legible by reading the
+        source, so an operator needs some way to see what the program
+        will accept.  \code{-o list} shall require the database but not
+        the network, and shall not sign in.
   \item[\req{REQ-F-05}] The usage text shall document every behaviour
         keyword (\code{fastest}, \code{csv}, \code{store},
         \code{offline}, \code{diag}, \code{selftest}), the \code{-m}
@@ -885,6 +905,7 @@ documented separately in the swim-times Verification Plan.
   REQ-I-13 \ldots REQ-I-17 & Inspection + Test (\texttt{test-db.sh}) \\
   REQ-F-76 & Test (joined offline read) \\
   REQ-F-77, REQ-F-77a & Test (absent swimmer) \\
+  REQ-R-01 \ldots REQ-R-04 & Test (merged roster, \texttt{-o list}) \\
   REQ-F-78 \ldots REQ-F-80 & Test (\texttt{test-db.sh} DB-19, DB-20) \\
   REQ-P-01, REQ-P-02, REQ-P-03 & Demonstration (timed) \\
   REQ-D-01, REQ-D-02, REQ-D-04 & Inspection \\
@@ -900,7 +921,7 @@ documented separately in the swim-times Verification Plan.
 
 \vfill
 \begin{center}
-  \small\textit{End of document CAST-SRS-001 Rev.\,6.0}
+  \small\textit{End of document CAST-SRS-001 Rev.\,7.0}
 \end{center}
 
 \end{document}

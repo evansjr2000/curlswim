@@ -62,10 +62,10 @@
   {\normalsize Prepared by: CAST Technology Working Group}\\[2em]
   \begin{tabular}{ll}
     Document identifier: & CAST-STP-001                                       \\
-    Revision:            & 6.0                                                \\
+    Revision:            & 7.0                                                \\
     Date:                & September 18, 2026                                 \\
     Status:              & Released                                           \\
-    Supersedes:          & Revision 5.0, September 18, 2026                    \\
+    Supersedes:          & Revision 6.0, September 19, 2026                    \\
     Governing standard:  & ISO/IEC/IEEE 29119-3:2021 (Test Documentation)     \\
   \end{tabular}
   \vfill
@@ -85,7 +85,7 @@
 
 \subsection{Document identifier}
 
-CAST-STP-001, revision 6.0.  This revision supersedes revision 5.0 in
+CAST-STP-001, revision 7.0.  This revision supersedes revision 6.0 in
 its entirety.
 
 \subsection{Purpose}
@@ -205,6 +205,27 @@ found neither the row nor the conflict, and would have inserted a
 duplicate person.  \req{DB-20} is the more important of the pair: it
 asserts what the match must \emph{not} do.  Loosening a match is only
 safe while it cannot cross into a row that has already been identified.
+
+\subsection{Rationale for revision 7.0}
+
+The roster is no longer compiled in.  It is now the union of the
+\code{SWIMMERS} table in \code{swim-times.w} and the
+\code{swimmer\_alias} table of the shared database, so a swimmer
+admitted by the sibling \code{addswimuser} program is selectable here on
+the next run without a rebuild.  That closes the drift this plan has
+noted since revision 5.0.
+
+It also changes what a test can assume.  The set of valid \code{-o}
+tokens is no longer knowable from the source, so \req{REQ-R-02} derives
+its expectation from the database itself --- it reads
+\code{swimmer\_alias} and requires every alias there to appear in
+\code{-o list}.  A case that hard-coded the roster would pass while the
+feature silently regressed.
+
+\req{REQ-R-03} guards the collision rule in the direction that matters:
+\code{ledecky10} exists in both, and the compiled-in entry must win, so
+that adding a row elsewhere cannot quietly change how a tuned lookup
+behaves.
 
 \subsection{Scope}
 
@@ -636,6 +657,32 @@ network, a missing database, and missing credentials.
 \end{longtable}
 \end{center}
 
+\subsection{The roster}
+
+\begin{center}
+\begin{longtable}{p{2.1cm}p{5.2cm}p{6.2cm}}
+  \toprule
+  \textbf{ID} & \textbf{Requirement} & \textbf{Method} \\
+  \midrule\endhead
+  \req{REQ-R-01} & \code{-o list} prints the merged roster
+    & At least the compiled-in count, and no sign-in: the listing needs
+      the database, not the network. \\
+  \req{REQ-R-02} & Every database alias is selectable
+    & The expectation is read from \code{swimmer\_alias} at run time,
+      not hard-coded: every alias the table holds must appear in
+      \code{-o list}.  This is the case that would catch the feature
+      regressing. \\
+  \req{REQ-R-03} & Compiled-in entries win a collision
+    & All 29 remain, and \code{ledecky10} --- which exists in both ---
+      is reported as \code{compiled}. \\
+  \req{REQ-R-04} & A database-only alias resolves and fetches
+    & The first alias marked \code{database} is fetched for one event
+      and must produce a \code{Swimmer:} line.  Skipped when not signed
+      in. \\
+  \bottomrule
+\end{longtable}
+\end{center}
+
 \subsection{Access-tier determination}
 
 \begin{center}
@@ -886,7 +933,7 @@ network, database, and a working USA~Swimming account (tier
   \toprule
   \textbf{Suite} & \textbf{Pass} & \textbf{Fail} & \textbf{Skip} \\
   \midrule
-  \code{test-swim-times.sh} & 67 & 0 & 4 \\
+  \code{test-swim-times.sh} & 71 & 0 & 4 \\
   \code{test-db.sh}         & 20 & 0 & 0 \\
   \bottomrule
 \end{tabular}
@@ -967,6 +1014,15 @@ to 18 when it was rewritten around the shared schema.
       & Med  & High & \req{DB-04} through \req{DB-11} check the shape
                       the program depends on, column by column, and
                       name what changed. \\
+  \code{swimmer\_alias} gains a malformed row
+      & Med  & Low  & A row missing any of alias, query, or substring is
+                      skipped rather than half-used; \req{REQ-R-02}
+                      reports it as an alias absent from the roster. \\
+  The two rosters disagree
+      & Med  & Low  & \req{REQ-R-03} fixes the precedence and asserts
+                      it.  \code{-o list} shows the provenance of every
+                      alias, so a disagreement is visible rather than
+                      inferred. \\
   A fixture is left behind after a failed run
       & Low  & Low  & Both suites remove the fixture from an
                       \code{EXIT} trap, so an interrupt or a failing

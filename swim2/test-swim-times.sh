@@ -259,7 +259,7 @@ fi
 # REQ-F-05: the usage text documents every behaviour keyword and -m
 usage=$("$BIN" 2>&1 >/dev/null)
 missing=""
-for kw in fastest csv store offline diag selftest "-m memberId" \
+for kw in fastest csv store offline diag selftest list "-m memberId" \
           USAS_USER USAS_PASS USAS_ENV_FILE USAS_SUB_ID USAS_SESSION_ID; do
     echo "$usage" | grep -q -- "$kw" || missing="$missing $kw"
 done
@@ -271,7 +271,7 @@ fi
 
 # REQ-F-06: the roster in the usage text is generated from SWIMMERS
 ids=$(echo "$usage" | sed -n '/swimmer ids/,/^$/p' | tr -s ' ' '\n' | grep -c '[a-z]')
-declared=$(echo "$usage" | sed -n 's/.*swimmer ids (\([0-9]*\)).*/\1/p')
+declared=$(echo "$usage" | sed -n 's/.*swimmer ids compiled in (\([0-9]*\)).*/\1/p')
 if [ -n "$declared" ] && [ "$declared" -ge 29 ]; then
     pass REQ-F-06 "usage lists all $declared roster ids"
 else
@@ -456,7 +456,8 @@ fi
 # REQ-L-07: no anonymous fallback.  The program must not retry a refused
 # query without credentials, and must not default its subject to
 # Anonymous on the data path.
-if grep -q 'if (!(g_opts & OPT_OFFLINE) && !ensure_session' "$SOURCE"; then
+if grep -q 'if (!(g_opts & (OPT_OFFLINE | OPT_LIST))' "$SOURCE" \
+   && grep -q '&& !ensure_session(g_opts & OPT_CSV))' "$SOURCE"; then
     pass REQ-L-07 "every online run signs in; no anonymous data path"
 else
     fail REQ-L-07 "online runs do not require a session"
@@ -662,6 +663,70 @@ else
     "$BIN" -o stella,csv -e "100 FR SCY" >"$WORK/a2" 2>/dev/null
     cmp -s "$WORK/a1" "$WORK/a2"
     check REQ-A-01 "back-to-back invocations produce identical output" $?
+fi
+
+# =================================================================
+# 8b. The roster
+# =================================================================
+section "Roster"
+
+ROSTER_TESTS="REQ-R-01 REQ-R-02 REQ-R-03 REQ-R-04"
+RCONN="dbname=swimming user=postgres host=100.77.243.69 port=5432 connect_timeout=10"
+
+if [ "$SKIP_DB" = "1" ] || ! command -v psql >/dev/null 2>&1 \
+   || [ "$(psql "$RCONN" -tAc 'SELECT 1' 2>/dev/null)" != "1" ]; then
+    for r in $ROSTER_TESTS; do skip "$r" "cannot reach swimming@100.77.243.69"; done
+else
+    lst="$WORK/list.out"
+    "$BIN" -o list >"$lst" 2>"$WORK/list.err"; rc=$?
+
+    # REQ-R-01: -o list reports the merged roster and needs no sign-in
+    n_alias=$(grep -cE ' (compiled|database)$' "$lst" || true)
+    if [ $rc -eq 0 ] && [ "$n_alias" -ge 29 ] \
+       && ! grep -q 'Signed in' "$lst"; then
+        pass REQ-R-01 "-o list printed $n_alias aliases without signing in"
+    else
+        fail REQ-R-01 "rc=$rc aliases=$n_alias"
+    fi
+
+    # REQ-R-02: every alias in swimmer_alias is selectable.  This is the
+    # whole point: a swimmer admitted by addswimuser must be usable here
+    # without rebuilding this program.
+    missing=""
+    for a in $(psql "$RCONN" -tAc "SELECT a.alias FROM swimmer_alias a
+                 JOIN swimmer s USING (swimmer_key) ORDER BY a.alias"); do
+        grep -qE "^  $a " "$lst" || missing="$missing $a"
+    done
+    if [ -z "$missing" ]; then
+        pass REQ-R-02 "every database alias appears in the roster"
+    else
+        fail REQ-R-02 "aliases absent from the roster:$missing"
+    fi
+
+    # REQ-R-03: the compiled-in entries are all still there, and win a
+    # collision.  ledecky10 exists in both; its compiled-in match_substr
+    # must be the one in force.
+    compiled=$(grep -c ' compiled$' "$lst" || true)
+    if [ "$compiled" -ge 29 ] && grep -qE '^  ledecky10 .* compiled$' "$lst"; then
+        pass REQ-R-03 "$compiled compiled-in entries retained; they win collisions"
+    else
+        fail REQ-R-03 "compiled=$compiled; collision handling wrong"
+    fi
+
+    # REQ-R-04: a database-only alias actually resolves and fetches.
+    dbonly=$(grep ' database$' "$lst" | awk '{print $1}' | head -1)
+    if [ -z "$dbonly" ]; then
+        skip REQ-R-04 "no database-only alias to exercise"
+    elif [ "$TIER" != "authorized" ]; then
+        skip REQ-R-04 "live fetch needs a signed-in run (tier=$TIER)"
+    else
+        out=$("$BIN" -o "$dbonly" -e "50 FR SCY" 2>/dev/null)
+        if echo "$out" | grep -q '^Swimmer:'; then
+            pass REQ-R-04 "database-only alias '$dbonly' resolved and fetched"
+        else
+            fail REQ-R-04 "'$dbonly' did not resolve"
+        fi
+    fi
 fi
 
 # =================================================================
